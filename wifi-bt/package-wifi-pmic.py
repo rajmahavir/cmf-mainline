@@ -28,6 +28,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("base", "image", "dtb", "packaging", "output"):
         parser.add_argument(name, type=Path)
+    parser.add_argument("--avb-key", type=Path, help="AVB key or public key for delegated signing")
+    parser.add_argument("--signing-helper", type=Path, help="AVB signing helper executable")
     args = parser.parse_args()
     boot_v9 = args.base.read_bytes()
     if hashlib.sha256(boot_v9).hexdigest() != V9_SHA256:
@@ -60,14 +62,15 @@ def main():
     run(sys.executable, tools / "mkbootimg/mkbootimg.py", "--header_version", "4",
         "--kernel", output / "payload.bin.gz", "--output", boot)
     avb = tools / "avb/avbtool.py"
-    key = args.packaging / "keys/candidate-avb.pem"
+    key = args.avb_key or args.packaging / "keys/candidate-avb.pem"
+    signing = ["--signing_helper", args.signing_helper] if args.signing_helper else []
     run(sys.executable, avb, "add_hash_footer", "--image", boot,
         "--partition_name", "boot", "--partition_size", str(PARTITION_SIZE),
         "--key", key, "--algorithm", "SHA256_RSA2048",
         "--salt", "b16a0ade6b083b84412dbb52857e7116386b9ca2633d8fd4fab1a7d6372b2e62",
         "--flags", "0", "--prop", "com.android.build.boot.os_version:14",
         "--prop", f"com.android.build.boot.fingerprint:{FINGERPRINT}",
-        "--prop", "com.android.build.boot.security_patch:2026-04-05")
+        "--prop", "com.android.build.boot.security_patch:2026-04-05", *signing)
     with (output / "avb-verification.txt").open("w") as log:
         run(sys.executable, avb, "verify_image", "--image", boot, "--key", key, stdout=log)
     signed = boot.read_bytes()

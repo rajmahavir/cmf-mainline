@@ -22,6 +22,10 @@ exec >/dev/kmsg 2>&1 </dev/null
 echo "<6>=== MAINLINE 7.2 V9 INITRAMFS REACHED ==="
 uname -a
 
+if [ -x /cmf/autostart.sh ]; then
+    /cmf/autostart.sh &
+fi
+
 if [ -c /dev/tty0 ]; then
     {
         echo "=========================================="

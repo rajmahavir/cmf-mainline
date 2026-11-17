@@ -155,8 +155,15 @@ ssh)
     ipv4=$(ip -4 addr show dev wlan0 | awk '$1 == "inet" {split($2, a, "/"); print a[1]; exit}')
     test -n "$ipv4"
     host_key=/tmp/cmf-dropbear-ed25519
-    tools/ld-musl-aarch64.so.1 --library-path tools tools/dropbearkey \
-        -t ed25519 -f "$host_key" > /tmp/cmf-dropbear-hostkey.log
+    if [ -s cmf_dropbear_host_key ]; then
+        mv cmf_dropbear_host_key "$host_key"
+        chmod 600 "$host_key"
+        tools/ld-musl-aarch64.so.1 --library-path tools tools/dropbearkey \
+            -y -f "$host_key" > /tmp/cmf-dropbear-hostkey.log
+    else
+        tools/ld-musl-aarch64.so.1 --library-path tools tools/dropbearkey \
+            -t ed25519 -f "$host_key" > /tmp/cmf-dropbear-hostkey.log
+    fi
     tools/ld-musl-aarch64.so.1 --library-path tools tools/dropbear \
         -s -j -k -E -P /tmp/cmf-dropbear.pid -r "$host_key" -p "$ipv4:2222" 2>/tmp/cmf-dropbear.log
     kill -0 "$(cat /tmp/cmf-dropbear.pid)"
