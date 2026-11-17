@@ -2,21 +2,45 @@
 set -eu
 umask 077
 
-slot=/cmf/private-bundle.slot
 work=/tmp/cmf-v13
-trap 'status=$?; rm -f "$work/wpa.conf"; if [ "$status" -ne 0 ]; then echo "<3>CMF autostart failed with status $status"; fi' EXIT
+header=/tmp/cmf-profile.header
+archive=/tmp/cmf-profile.tar.gz
+trap 'status=$?; rm -f "$work/wpa.conf" "$header" "$archive"; if [ "$status" -ne 0 ]; then echo "<3>CMF autostart failed with status $status"; fi' EXIT
 
-read -r size < "$slot"
-case "$size" in
-    ??????????) ;;
-    *) exit 1 ;;
-esac
-case "$size" in *[!0-9]*) exit 1 ;; esac
-size=$(printf '%s' "$size" | sed 's/^0*//')
-test -n "$size"
-test "$size" -le "$(( $(wc -c < "$slot") - 11 ))"
+partition=
+for attempt in $(seq 1 25); do
+    for event in /sys/class/block/*/uevent; do
+        if grep -qx 'PARTNAME=boot_a' "$event"; then
+            partition=/dev/$(sed -n 's/^DEVNAME=//p' "$event")
+            break
+        fi
+    done
+    [ -b "$partition" ] && break
+    sleep 1
+done
+if [ ! -b "$partition" ]; then
+    echo '<3>CMF autostart: boot_a block device unavailable'
+    exit 1
+fi
+
+dd if="$partition" of="$header" bs=4096 skip=8192 count=1 2>/dev/null
+{
+    IFS= read -r marker
+    IFS= read -r size
+    IFS= read -r digest
+} < "$header"
+test "$marker" = CMF_BOOT_PROFILE_V1
+case "$size" in ''|*[!0-9]*) exit 1 ;; esac
+case "$digest" in *[!a-f0-9]*) exit 1 ;; esac
+test "${#digest}" -eq 64
+test "${#size}" -le 8
+test "$size" -gt 0 && test "$size" -le 12582912
+dd if="$partition" bs=4096 skip=8193 count="$(( (size + 4095) / 4096 ))" 2>/dev/null |
+    head -c "$size" > "$archive"
+printf '%s  %s\n' "$digest" "$archive" | sha256sum -c
 mkdir -p "$work"
-tail -c +12 "$slot" | head -c "$size" | tar -xzf - -C "$work"
+tar -xzf "$archive" -C "$work"
+rm -f "$archive" "$header"
 test -s "$work/wpa.conf"
 test -s "$work/cmf_authorized_keys"
 test -s "$work/cmf_dropbear_host_key"

@@ -14,6 +14,10 @@ V9_SHA256 = "c05205440c7baef1fa68a89b6cabf5b422247fca10e95121f3678c9d67d98cfe"
 DTB_OFFSET = 0x1000
 IMAGE_OFFSET = 0x200000
 PARTITION_SIZE = 67108864
+PROFILE_OFFSET = 32 * 1024 * 1024
+PROFILE_HEADER_SIZE = 4096
+PROFILE_LIMIT = 12 * 1024 * 1024
+PROFILE_MARKER = b"CMF_BOOT_PROFILE_V1"
 FINGERPRINT = (
     "alps/hal_mgvi_64_64only_ww_armv82/mgvi_64_64only_ww_armv82:"
     "14/UP1A.231005.007/2609281140:user/release-keys"
@@ -24,12 +28,28 @@ def run(*args, **kwargs):
     subprocess.run(args, check=True, **kwargs)
 
 
+def append_profile(boot, profile_path):
+    profile = profile_path.read_bytes()
+    if not profile.startswith(b"\x1f\x8b") or len(profile) > PROFILE_LIMIT:
+        raise ValueError("Expected a gzip profile no larger than 12 MiB")
+    if boot.stat().st_size > PROFILE_OFFSET:
+        raise ValueError("Boot image overlaps the private profile offset")
+    digest = hashlib.sha256(profile).hexdigest().encode("ascii")
+    header = b"\n".join((PROFILE_MARKER, str(len(profile)).encode("ascii"), digest, b""))
+    with boot.open("r+b") as image:
+        image.seek(PROFILE_OFFSET)
+        image.write(header.ljust(PROFILE_HEADER_SIZE, b"\0"))
+        image.write(profile)
+    return header, profile
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("base", "image", "dtb", "packaging", "output"):
         parser.add_argument(name, type=Path)
     parser.add_argument("--avb-key", type=Path, help="AVB key or public key for delegated signing")
     parser.add_argument("--signing-helper", type=Path, help="AVB signing helper executable")
+    parser.add_argument("--private-profile", type=Path, help="Local gzip boot profile to append before signing")
     args = parser.parse_args()
     boot_v9 = args.base.read_bytes()
     if hashlib.sha256(boot_v9).hexdigest() != V9_SHA256:
@@ -61,6 +81,8 @@ def main():
     tools = args.packaging / "tools"
     run(sys.executable, tools / "mkbootimg/mkbootimg.py", "--header_version", "4",
         "--kernel", output / "payload.bin.gz", "--output", boot)
+    if args.private_profile:
+        header, profile = append_profile(boot, args.private_profile)
     avb = tools / "avb/avbtool.py"
     key = args.avb_key or args.packaging / "keys/candidate-avb.pem"
     signing = ["--signing_helper", args.signing_helper] if args.signing_helper else []
@@ -77,6 +99,11 @@ def main():
     signed_kernel_size = struct.unpack_from("<I", signed, 8)[0]
     if len(signed) != PARTITION_SIZE or gzip.decompress(signed[0x1000:0x1000 + signed_kernel_size]) != payload:
         raise ValueError("Signed boot image differs from the verified payload")
+    if args.private_profile:
+        data_start = PROFILE_OFFSET + PROFILE_HEADER_SIZE
+        if (not signed[PROFILE_OFFSET:data_start].startswith(header)
+                or signed[data_start:data_start + len(profile)] != profile):
+            raise ValueError("Signed boot image differs from the private profile")
     manifest = {}
     for path in (boot, output / "candidate.dtb", args.image):
         manifest[path.name] = {

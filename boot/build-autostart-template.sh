@@ -21,13 +21,6 @@ mkdir -p "$root"/{bin,proc,sys,dev,tmp,run,root,cmf}
 install -m 755 "$busybox" "$root/bin/busybox"
 install -m 755 "$assets/init" "$root/init"
 install -m 755 "$assets/autostart.sh" "$root/cmf/autostart.sh"
-python3 - "$root/cmf/private-bundle.slot" <<'PY'
-from pathlib import Path
-import sys
-
-marker = b"CMF-V16-PRIVATE-BUNDLE-PLACEHOLDER\n"
-Path(sys.argv[1]).write_bytes(marker.ljust(12 * 1024 * 1024, b"\0"))
-PY
 cc -O2 "$src/usr/gen_init_cpio.c" -o "$build/usr/gen_init_cpio"
 (
     cd "$build"
@@ -35,10 +28,10 @@ cc -O2 "$src/usr/gen_init_cpio.c" -o "$build/usr/gen_init_cpio"
 )
 "$src/scripts/config" --file "$build/.config" \
     --set-str INITRAMFS_SOURCE "$out/initramfs.cpio" \
-    --disable INITRAMFS_COMPRESSION_GZIP --enable INITRAMFS_COMPRESSION_NONE
+    --disable INITRAMFS_COMPRESSION_NONE --enable INITRAMFS_COMPRESSION_GZIP
 make_args=(-C "$src" "O=$build" ARCH=arm64 LLVM=1)
 make "${make_args[@]}" olddefconfig
-grep -qx 'CONFIG_INITRAMFS_COMPRESSION_NONE=y' "$build/.config"
+grep -qx 'CONFIG_INITRAMFS_COMPRESSION_GZIP=y' "$build/.config"
 make -j"${CMF_JOBS:-2}" "${make_args[@]}" Image
 cp "$build/arch/arm64/boot/Image" "$out/Image"
 cp "$dtb" "$out/candidate.dtb"
