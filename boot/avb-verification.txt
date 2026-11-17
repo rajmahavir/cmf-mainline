@@ -1,0 +1,3 @@
+Verifying image /home/raj/mt6878-mainline/out/diagnostic-v9-final/boot.img using embedded public key
+vbmeta: Successfully verified footer and SHA256_RSA2048 vbmeta struct in /home/raj/mt6878-mainline/out/diagnostic-v9-final/boot.img
+boot: Successfully verified sha256 hash of /home/raj/mt6878-mainline/out/diagnostic-v9-final/boot.img for image of 15364096 bytes

@@ -1,0 +1,13 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+
+&{/connfem} {
+	status = "okay";
+};
+
+&{/consys@18000000} {
+	status = "okay";
+};
+
+&{/wifi@18400000} {
+	status = "okay";
+};

@@ -1,0 +1,120 @@
+{
+  "boot_sha256": "e17ec7d0bdcd9925b5ca7aecc901ac72e8ff21e049421d9417873fcf39427f3d",
+  "wrapper_header": {
+    "code0": 335544336,
+    "code1": 0,
+    "text_offset": 0,
+    "image_size": 40501248,
+    "flags": 10,
+    "reserved2": 0,
+    "reserved3": 0,
+    "reserved4": 0,
+    "magic": 1682788929,
+    "pe_offset": 0
+  },
+  "kernel_header": {
+    "code0": 4198521421,
+    "code1": 343495741,
+    "text_offset": 0,
+    "image_size": 38404096,
+    "flags": 10,
+    "reserved2": 0,
+    "reserved3": 0,
+    "reserved4": 0,
+    "magic": 1682788929,
+    "pe_offset": 64
+  },
+  "decoded_wrapper": {
+    "dtb_offset": "0x1000",
+    "branch_offset": "0x200000",
+    "x1_x2_x3_zero": true
+  },
+  "wrapper_protocol_checks": {
+    "covers_kernel_effective_span": true,
+    "kernel_flags_match": true,
+    "kernel_file_fits_effective_span": true,
+    "dtb_fits_prefix": true,
+    "dtb_aligned_8": true
+  },
+  "placement": {
+    "assumed_lk_destination": "0x40000000",
+    "raw_payload_end": "0x425f1a00",
+    "kernel_start": "0x40200000",
+    "kernel_effective_end": "0x426a0000",
+    "kernel_alignment_valid": true,
+    "dtb_start": "0x40001000",
+    "dtb_end": "0x40007879",
+    "overlaps": []
+  },
+  "avb": {
+    "original_image_size": 15466496,
+    "vbmeta_offset": 15466496,
+    "vbmeta_size": 1664,
+    "algorithm_type": 1,
+    "flags": 0,
+    "hash_descriptors": [
+      {
+        "partition": "boot",
+        "image_size": 15466496,
+        "algorithm": "sha256",
+        "flags": 0,
+        "digest_matches": true
+      }
+    ],
+    "rsa_signature_verified_here": false
+  },
+  "dtb_diff_from_baseline": [
+    {
+      "path": "/bt@18800000",
+      "property": "compatible",
+      "baseline_hex": null,
+      "candidate_hex": "6d6564696174656b2c627400"
+    },
+    {
+      "path": "/bt@18800000",
+      "property": "interrupts",
+      "baseline_hex": null,
+      "candidate_hex": "00000000000002b5000000040000000000000000000000840000000400000000"
+    },
+    {
+      "path": "/bt@18800000",
+      "property": "reg",
+      "baseline_hex": null,
+      "candidate_hex": "00000000188000000000000000001000000000001800000000000000000010000000000018001000000000000000100000000000180510000000000000001000000000001806000000000000000010000000000018812000000000000000100000000000100010000000000000001000"
+    }
+  ],
+  "extracted": {
+    "payload.bin.gz": {
+      "bytes": 15460985,
+      "sha256": "7565bcc6c7bc12f5c17ec247087adc94e29cf36a211653a361e4bdadb8c6a5c0"
+    },
+    "payload_raw.bin": {
+      "bytes": 39787008,
+      "sha256": "cccda8547fc5e33d4cc9f8f3d108d9ca0025cb015e996212887c608e7a709a41"
+    },
+    "Image": {
+      "bytes": 37689856,
+      "sha256": "255e2ad76ce8ed54b52b66a65e3cf2870d13d4852035d36672377c024388b19d"
+    },
+    "candidate.dtb": {
+      "bytes": 26745,
+      "sha256": "f3396ef7ef69f2a6fccd6974bf2deafd4c01b1875c9dbaf673fa25df8ff45566"
+    },
+    "wrapper.bin": {
+      "bytes": 128,
+      "sha256": "e3dbadb4f50a087ad19ca12f3cb603f8589edcb1e1e25af21bb3810228d8597f"
+    },
+    "kernel.config": {
+      "bytes": 200283,
+      "sha256": "72abd83de73b3120121da5cc2df5be691a6cb688d1a178fdda254b9b6e233289"
+    },
+    "initramfs.cpio": {
+      "bytes": 1715712,
+      "sha256": "2dd2707b924d72c8e5ba2b3fd2d70654968acdfbeb2d14b797c222067555dbb3"
+    },
+    "init": {
+      "bytes": 2980,
+      "sha256": "252a42aa350ff2ee6bdc0cefaebb6cb6de41e5aa563248bfb3fc982ad24110d1"
+    }
+  }
+}

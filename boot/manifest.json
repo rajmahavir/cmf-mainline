@@ -1,0 +1,21 @@
+{
+  "boot.img": {
+    "bytes": 67108864,
+    "sha256": "c05205440c7baef1fa68a89b6cabf5b422247fca10e95121f3678c9d67d98cfe"
+  },
+  "kernel": {
+    "bytes": 37419520,
+    "sha256": "198a41f60bbdd5cec75ca5ad3a983edf3eb7874794ba130e4d1c798f32afa42e"
+  },
+  "initramfs.cpio": {
+    "bytes": 1715712,
+    "sha256": "2dd2707b924d72c8e5ba2b3fd2d70654968acdfbeb2d14b797c222067555dbb3"
+  },
+  "repack": {
+    "base_boot_sha256": "129a39abb9564ca2f53857f0662609943795c587b0c32969ed750cb2ac0fdd21",
+    "payload_offset": 35864012,
+    "region_bytes": 970041,
+    "compressed_bytes": 969969,
+    "outside_initramfs_region_byte_identical": true
+  }
+}

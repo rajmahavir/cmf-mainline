@@ -1,0 +1,28 @@
+diff --git a/drivers/pinctrl/mediatek/pinctrl-mt6878.c b/drivers/pinctrl/mediatek/pinctrl-mt6878.c
+index b59ae0891..319a23d0d 100644
+--- a/drivers/pinctrl/mediatek/pinctrl-mt6878.c
++++ b/drivers/pinctrl/mediatek/pinctrl-mt6878.c
+@@ -1414,7 +1414,7 @@ static const char * const mt6878_pinctrl_register_base_names[] = {
+ static const struct mtk_eint_hw mt6878_eint_hw = {
+ 	.port_mask = 31,
+ 	.ports     = 1,
+-	.ap_num    = 216,
++	.ap_num    = ARRAY_SIZE(eint_pins_mt6878),
+ 	.db_cnt    = 36,
+ 	.db_time   = debounce_time_mt6878,
+ };
+diff --git a/drivers/pinctrl/mediatek/pinctrl-mtk-mt6878.h b/drivers/pinctrl/mediatek/pinctrl-mtk-mt6878.h
+index a251af00e..ed067d098 100644
+--- a/drivers/pinctrl/mediatek/pinctrl-mtk-mt6878.h
++++ b/drivers/pinctrl/mediatek/pinctrl-mtk-mt6878.h
+@@ -2223,7 +2223,9 @@ static struct mtk_eint_pin eint_pins_mt6878[] = {
+ 	MTK_EINT_PIN(114, 1, 44, 0),
+ 	MTK_EINT_PIN(115, 1, 45, 0),
+ 	MTK_EINT_PIN(116, 1, 46, 0),
+-	MTK_EINT_PIN(196, 3, 0, 0),
++	/* EINT 117 through 195 are not wired to an interrupt bank. */
++	[117 ... 195] = { .instance = U8_MAX },
++	[196] = MTK_EINT_PIN(196, 3, 0, 0),
+ 	MTK_EINT_PIN(197, 3, 1, 0),
+ 	MTK_EINT_PIN(198, 3, 2, 0),
+ 	MTK_EINT_PIN(199, 3, 3, 0),

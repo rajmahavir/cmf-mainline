@@ -1,0 +1,7 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+
+/* Populate the watchdog's stock syscon reboot-mode child. */
+&{/soc@0/watchdog@1c00a000} {
+	compatible = "mediatek,mt6878-wdt", "mediatek,mt6589-wdt",
+		     "syscon", "simple-mfd";
+};

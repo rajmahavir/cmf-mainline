@@ -1,0 +1,392 @@
+--- a/6878/Kbuild
++++ b/6878/Kbuild
+@@ -1,4 +1,4 @@
+ BT_PLATFORM := 6878
+ LOG_TAG := [BT_Drv][btif]
+ 
+-include $(srctree)/$(src)/../btif/Kbuild
++include $(abspath $(src))/../btif/Kbuild
+--- a/btif/Kbuild
++++ b/btif/Kbuild
+@@ -13,7 +13,7 @@
+ LINUXINCLUDE := $(DEVCIE_MODULES_INCLUDE) $(LINUXINCLUDE)
+ TOP := $(srctree)/..
+ endif
+-KO_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++KO_PATH := $(abspath $(src))
+ $(info [bt_drv] btif/Kbuild KO_PATH=$(KO_PATH) DEVICE_MODULES_PATH=$(DEVICE_MODULES_PATH))
+ 
+ ifndef TOP
+--- a/btif/btmtk_dbg.c
++++ b/btif/btmtk_dbg.c
+@@ -8,7 +8,6 @@
+ #include <linux/proc_fs.h>
+ #include <linux/gpio.h>
+ #include <linux/of.h>
+-#include <linux/of_gpio.h>
+ 
+ #include "btmtk_define.h"
+ #include "btmtk_chip_if.h"
+@@ -313,7 +312,7 @@
+ 	}
+ 	policy = par2;
+ 	params.sched_priority = par3;
+-	ret = sched_setscheduler(cif_dev->tx_thread, policy, &params);
++	ret = btmtk_set_scheduler(cif_dev->tx_thread, policy, &params);
+ 	BTMTK_INFO("%s: ret[%d], policy[%d], sched_priority[%d]", __func__, ret, policy, params.sched_priority);
+ 
+ 	return 0;
+@@ -916,7 +915,7 @@
+ 		// save to the new column
+ 		if (bthost_info_table[i].id == 0){
+ 			bthost_info_table[i].id = id;
+-			strncpy(bthost_info_table[i].desc, desc, BTHOST_DESC_LEN - 1);
++			strscpy(bthost_info_table[i].desc, desc, BTHOST_DESC_LEN);
+ 			bthost_info_table[i].value = value;
+ 			return;
+ 		}
+--- a/include/btmtk_define.h
++++ b/include/btmtk_define.h
+@@ -20,7 +20,7 @@
+ #include <linux/spinlock.h>
+ #include <linux/kallsyms.h>
+ #include <linux/device.h>
+-#include <asm/unaligned.h>
++#include <linux/unaligned.h>
+ 
+ /* Define for proce node */
+ #include <linux/proc_fs.h>
+@@ -28,7 +28,6 @@
+ 
+ /* Define for whole chip reset */
+ #include <linux/of.h>
+-#include <linux/of_gpio.h>
+ 
+ #include <linux/kthread.h>
+ #include <linux/freezer.h>
+--- a/btif/btmtk_char_dev.c
++++ b/btif/btmtk_char_dev.c
+@@ -533,8 +533,7 @@
+ 	init_waitqueue_head(&inq);
+ 
+ 	/* Initialize wake lock for I/O operation */
+-	strncpy(bt_wakelock.name, "bt_drv_io", 9);
+-	bt_wakelock.name[9] = 0;
++	strscpy(bt_wakelock.name, "bt_drv_io", sizeof(bt_wakelock.name));
+ 	bt_wake_lock_init(&bt_wakelock);
+ 
+ 	g_btif_dev.state_change_cb[0] = fw_log_bt_state_cb;
+@@ -554,7 +553,7 @@
+ 	if (cdv_err)
+ 		goto cdv_error;
+ 
+-	BT_class = class_create(THIS_MODULE, BT_DRIVER_NODE_NAME);
++	BT_class = class_create(BT_DRIVER_NODE_NAME);
+ 	if (IS_ERR(BT_class))
+ 		goto create_node_error;
+ 	BT_dev = device_create(BT_class, NULL, dev, NULL, BT_DRIVER_NODE_NAME);
+--- a/include/btif/btmtk_btif.h
++++ b/include/btif/btmtk_btif.h
+@@ -205,9 +205,19 @@
+ #define BT_BTIF_DUMP_DMA		0x08
+ #define BT_BTIF_DUMP_ALL		0x0F
+ 
+-struct sched_param {
+-	int sched_priority;
+-};
++#include <uapi/linux/sched/types.h>
++
++static inline int btmtk_set_scheduler(struct task_struct *task, int policy,
++                                      const struct sched_param *param)
++{
++	struct sched_attr attr = {
++		.size = sizeof(attr),
++		.sched_policy = policy,
++		.sched_priority = param->sched_priority,
++	};
++
++	return sched_setattr_nocheck(task, &attr);
++}
+ 
+ struct bt_dbg_st {
+ 	bool rt_thd_enable;
+@@ -496,8 +506,7 @@
+ static inline void bt_psm_init(struct bt_psm_ctrl *psm)
+ {
+ 	init_completion(&psm->comp);
+-	strncpy(psm->wake_lock.name, "bt_psm", 6);
+-	psm->wake_lock.name[6] = '\0';
++	strscpy(psm->wake_lock.name, "bt_psm", sizeof(psm->wake_lock.name));
+ 	bt_wake_lock_init(&psm->wake_lock);
+ }
+ 
+--- a/btmtk_fw_log.c
++++ b/btmtk_fw_log.c
+@@ -128,7 +128,7 @@
+ 	if (cdevErr)
+ 		goto cdv_error;
+ 
+-	g_fwlog->pBTClass = class_create(THIS_MODULE, BT_FWLOG_DEV_NODE);
++	g_fwlog->pBTClass = class_create(BT_FWLOG_DEV_NODE);
+ 	if (IS_ERR(g_fwlog->pBTClass)) {
+ 		BTMTK_ERR("%s: class create fail, error code(%ld)\n", __func__, PTR_ERR(g_fwlog->pBTClass));
+ 		goto create_node_error;
+--- a/btif/btmtk_mt66xx.c
++++ b/btif/btmtk_mt66xx.c
+@@ -1,3 +1,4 @@
++#include <linux/vmalloc.h>
+ /* SPDX-License-Identifier: GPL-2.0 */
+ /*
+  * Copyright (c) 2019 MediaTek Inc.
+@@ -158,7 +159,7 @@
+ 
+ 	/* Check patch header information */
+ 	p_patch_hdr = (struct fw_patch_emi_hdr *)p_buf;
+-	strncpy(patch_datetime, p_patch_hdr->date_time, EMI_DATETIME_LEN);
++	memcpy(patch_datetime, p_patch_hdr->date_time, EMI_DATETIME_LEN);
+ 	patch_datetime[EMI_DATETIME_LEN - 2] = '\0'; // 14 bytes actually
+ 
+ 	/* Caculate crc from body patch */
+@@ -459,7 +460,7 @@
+ 	hw_ver = p_patch_hdr->hw_ver;
+ 	sw_ver = p_patch_hdr->sw_ver;
+ 	subsys_id = p_patch_hdr->subsys_id;
+-	strncpy(datetime, p_patch_hdr->date_time, sizeof(p_patch_hdr->date_time));
++	memcpy(datetime, p_patch_hdr->date_time, sizeof(p_patch_hdr->date_time));
+ 	datetime[sizeof(p_patch_hdr->date_time) - 2] = '\0'; // 14 bytes actually
+ 	BTMTK_INFO(
+ 		"[Patch]BTime=%s,HVer=0x%04x,SVer=0x%04x,Plat=%c%c%c%c,Addr=0x%02x%02x%02x%02x,Type=%x",
+@@ -1906,7 +1907,7 @@
+ 
+ 	if(g_bt_dbg_st.rt_thd_enable) {
+ 		sch_param.sched_priority = MAX_RT_PRIO - 20;
+-		sch_ret = sched_setscheduler(cif_dev->tx_thread, SCHED_FIFO, &sch_param);
++		sch_ret = btmtk_set_scheduler(cif_dev->tx_thread, SCHED_FIFO, &sch_param);
+ 		BTMTK_INFO("sch_ret = %d", sch_ret);
+ 		if (sch_ret != 0)
+ 			BTMTK_INFO("set RT thread failed");
+--- a/btif/btmtk_btif_main.c
++++ b/btif/btmtk_btif_main.c
+@@ -25,9 +25,6 @@
+ #endif
+ #include "connectivity_build_in_adapter.h"
+ #include "connsys_debug_utility.h"
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+-#include "mtk_disp_notify.h"
+-#endif
+ 
+ /*******************************************************************************
+ *                              C O N S T A N T S
+@@ -160,108 +157,6 @@
+ 	return 0;
+ }
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+-int btmtk_disp_notify_cb(struct notifier_block *nb, unsigned long value, void *v)
+-{
+-	int *data = (int *)v;
+-	int32_t new_state = 0;
+-	struct btmtk_btif_dev *cif_dev = (struct btmtk_btif_dev *)g_sbdev->cif_dev;
+-	/*
+-		MTK_DISP_EARLY_EVENT_BLANK: This event will happen before lcm suspend/resume
+-		MTK_DISP_EVENT_BLANK: This event will happen after lcm suspend/resume
+-		MTK_DISP_BLANK_UNBLANK: which means display resume (power on), 0x0
+-		MTK_DISP_BLANK_POWERDOWN: which mean display suspend (power off), 0x1
+-	*/
+-
+-	BTMTK_INFO("%s: value[%ld], data[%d]", __func__, value, *data);
+-	if (value == MTK_DISP_EARLY_EVENT_BLANK) {
+-		switch (*data) {
+-			case MTK_DISP_BLANK_UNBLANK:
+-				new_state = WMT_PARA_SCREEN_ON;
+-				break;
+-			case MTK_DISP_BLANK_POWERDOWN:
+-				new_state = WMT_PARA_SCREEN_OFF;
+-				break;
+-			default:
+-				BTMTK_INFO("%s: end", __func__);
+-				goto end;
+-		}
+-
+-		if(cif_dev->bt_state == FUNC_ON) {
+-			BTMTK_INFO("%s: blank state [%d]->[%d], and send cmd", __func__, cif_dev->blank_state, new_state);
+-			cif_dev->blank_state = new_state;
+-			btmtk_intcmd_wmt_blank_status(g_sbdev->hdev, cif_dev->blank_state);
+-		} else {
+-			BTMTK_INFO("%s: blank state [%d]->[%d]", __func__, cif_dev->blank_state, new_state);
+-			cif_dev->blank_state = new_state;
+-		}
+-        	BTMTK_INFO("%s: end", __func__);
+-	}
+-end:
+-	BTMTK_DBG("%s: end", __func__);
+-	return 0;
+-}
+-
+-struct notifier_block btmtk_disp_notifier = {
+-	.notifier_call = btmtk_disp_notify_cb,
+-};
+-
+-#else
+-static struct notifier_block bt_fb_notifier;
+-static int btmtk_fb_notifier_callback(struct notifier_block
+-				*self, unsigned long event, void *data)
+-{
+-	struct fb_event *evdata = data;
+-	int32_t blank = *(int32_t *)evdata->data;
+-	int32_t new_state = 0;
+-	struct btmtk_btif_dev *cif_dev = (struct btmtk_btif_dev *)g_sbdev->cif_dev;
+-
+-	if ((event != FB_EVENT_BLANK))
+-		return 0;
+-
+-	switch (blank) {
+-		case FB_BLANK_UNBLANK:
+-			new_state = WMT_PARA_SCREEN_ON;
+-			break;
+-		case FB_BLANK_POWERDOWN:
+-			new_state = WMT_PARA_SCREEN_OFF;
+-			break;
+-		default:
+-			goto end;
+-	}
+-
+-	if(cif_dev->bt_state == FUNC_ON) {
+-		BTMTK_INFO("%s: blank state [%ld]->[%ld], and send cmd", __func__, cif_dev->blank_state, new_state);
+-		cif_dev->blank_state = new_state;
+-		btmtk_intcmd_wmt_blank_status(g_sbdev->hdev, cif_dev->blank_state);
+-	} else {
+-		BTMTK_INFO("%s: blank state [%ld]->[%ld]", __func__, cif_dev->blank_state, new_state);
+-		cif_dev->blank_state = new_state;
+-	}
+-end:
+-	return 0;
+-}
+-
+-static int btmtk_fb_notify_register(void)
+-{
+-	int32_t ret;
+-
+-	bt_fb_notifier.notifier_call = btmtk_fb_notifier_callback;
+-
+-	ret = fb_register_client(&bt_fb_notifier);
+-	if (ret)
+-		BTMTK_ERR("Register wlan_fb_notifier failed:%d\n", ret);
+-	else
+-		BTMTK_DBG("Register wlan_fb_notifier succeed\n");
+-
+-	return ret;
+-}
+-
+-static void btmtk_fb_notify_unregister(void)
+-{
+-	fb_unregister_client(&bt_fb_notifier);
+-}
+-#endif
+ 
+ static struct notifier_block bt_pm_notifier;
+ static int btmtk_pm_notifier_callback(struct notifier_block *nb,
+@@ -1708,13 +1603,6 @@
+ 
+ 	/* 8. Register screen on/off & suspend/wakup notify callback */
+ 	cif_dev->blank_state = WMT_PARA_SCREEN_ON;
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+-	if (mtk_disp_notifier_register("btmtk_disp_notifier", &btmtk_disp_notifier)) {
+-                BTMTK_ERR("Register mtk_disp_notifier failed\n");
+-	}
+-#else
+-	btmtk_fb_notify_register();
+-#endif
+ 	btmtk_pm_notify_register();
+ 
+ 	/* 9. Init debug interface */
+@@ -1756,7 +1644,7 @@
+  * Return Value:
+  *     0 if success, otherwise error code
+  */
+-static int btmtk_cif_remove(struct platform_device *pdev)
++static void btmtk_cif_remove(struct platform_device *pdev)
+ {
+ 	struct btmtk_btif_dev *cif_dev = (struct btmtk_btif_dev *)g_sbdev->cif_dev;
+ 
+@@ -1766,11 +1654,6 @@
+ 
+ 	/* Unregister screen on/off & suspend/wakup notify callback */
+ 
+-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
+-	mtk_disp_notifier_unregister(&btmtk_disp_notifier);
+-#else
+-	btmtk_fb_notify_unregister();
+-#endif
+ 	btmtk_pm_notify_unregister();
+ 
+ 	bt_psm_deinit(&cif_dev->psm);
+@@ -1786,8 +1669,6 @@
+ #endif
+ 
+ 	bt_reg_deinit();
+-
+-	return 0;
+ }
+ 
+ /* btmtk_cif_register
+@@ -1951,7 +1832,8 @@
+ 
+ 	BTMTK_INFO("%s start running...", __func__);
+ 	do {
+-		strncpy(state_tag, (psm->state == PSM_ST_SLEEP ? "[ST_SLEEP]" : "[ST_NORMAL]"), 15);
++		strscpy(state_tag, psm->state == PSM_ST_SLEEP ? "[ST_SLEEP]" : "[ST_NORMAL]",
++			sizeof(state_tag));
+ 		BTMTK_DBG("%s -- wait_event_interruptible", state_tag);
+ 		wait_event_interruptible(cif_dev->tx_waitq, bt_tx_wait_for_msg(bdev));
+ 		BTMTK_DBG("%s -- wakeup", state_tag);
+--- a/btmtk_main.c
++++ b/btmtk_main.c
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2019 MediaTek Inc.
+  */
+ 
++#include <linux/vmalloc.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_irq.h>
+@@ -3737,9 +3738,6 @@
+ 	hdev->bus = hci_bus_type;
+ 	hci_set_drvdata(hdev, bdev);
+ 
+-	/* HCI_PRIMARY = 0x00 */
+-	hdev->dev_type = 0x00;
+-
+ 	bdev->hdev = hdev;
+ 
+ 	/* register hci callback */
+--- a/btif/btmtk_beif.c
++++ b/btif/btmtk_beif.c
+@@ -3,6 +3,7 @@
+  * Copyright (c) 2019 MediaTek Inc.
+  */
+ #if SUPPORT_BEIF
++#include <linux/vmalloc.h>
+ #include "btmtk_beif_plat.h"
+ #include "btmtk_beif.h"
+ 
+@@ -613,12 +614,15 @@
+ #ifndef BEIF_CTP_LOAD
+ static int beif_rx_thread(void *p_data)
+ {
+-	struct sched_param sch_param;
++	struct sched_attr attr = {
++		.size = sizeof(attr),
++		.sched_policy = SCHED_RR,
++		.sched_priority = MAX_RT_PRIO - 10,
++	};
+ 	int ret;
+ 
+-	sch_param.sched_priority = MAX_RT_PRIO - 10;
+-	ret = sched_setscheduler(current, SCHED_RR, &sch_param);
+-	pr_info("%s prio = %d, ret = %d\n", __func__, sch_param.sched_priority, ret);
++	ret = sched_setattr_nocheck(current, &attr);
++	pr_info("%s prio = %d, ret = %d\n", __func__, attr.sched_priority, ret);
+ 
+ 	while (1) {
+ 		wait_for_completion_interruptible(&rx_comp);

@@ -1,0 +1,12 @@
+# Build outputs and large binary blobs
+*.img
+*.bin
+*.elf
+*.o
+*.ko
+*.tar.gz
+*.cpio
+*.log
+*.tmp
+*~
+.DS_Store

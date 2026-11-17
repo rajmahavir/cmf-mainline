@@ -1,0 +1,353 @@
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index a54a54919..c7edbadbd 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -984,6 +984,13 @@ config REGULATOR_MT6363
+ 	  This driver supports the control of different power rails of device
+ 	  through regulator interface.
+ 
++config REGULATOR_MT636X_RF
++	tristate "MediaTek MT6363 and MT6369 RF regulators"
++	depends on SPMI && OF
++	select REGMAP_SPMI
++	help
++	  Enable the RF LDO regulators on the MT6363 and MT6369 SPMI PMICs.
++
+ config REGULATOR_MT6370
+ 	tristate "MT6370 SubPMIC Regulator"
+ 	depends on MFD_MT6370
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index 134eee274..8e668c23e 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -116,6 +116,7 @@ obj-$(CONFIG_REGULATOR_MT6358)	+= mt6358-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6359)	+= mt6359-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6360) += mt6360-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6363) += mt6363-regulator.o
++obj-$(CONFIG_REGULATOR_MT636X_RF) += mt636x-rf-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6370) += mt6370-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6380)	+= mt6380-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6397)	+= mt6397-regulator.o
+diff --git a/drivers/spmi/spmi-mtk-pmif.c b/drivers/spmi/spmi-mtk-pmif.c
+index 1048420b5..8377bfdf9 100644
+--- a/drivers/spmi/spmi-mtk-pmif.c
++++ b/drivers/spmi/spmi-mtk-pmif.c
+@@ -52,6 +52,7 @@ struct pmif_data {
+ 	u32	soc_chan;
+ 	u8	spmi_ver;
+ 	u32	num_spmi_buses;
++	bool	firmware_clocks;
+ };
+ 
+ struct pmif_bus {
+@@ -69,7 +70,7 @@ struct pmif_bus {
+ };
+ 
+ struct pmif {
+-	struct pmif_bus bus[PMIF_MAX_BUSES];
++	struct pmif_bus *bus[PMIF_MAX_BUSES];
+ 	struct ch_reg	chan;
+ 	const struct pmif_data *data;
+ };
+@@ -630,6 +631,15 @@ static const struct pmif_data mt6873_pmif_arb = {
+ 	.soc_chan = 2,
+ };
+ 
++/* MT6878 uses RCS interrupts and boots with its PMIF clocks configured. */
++static const struct pmif_data mt6878_pmif_arb = {
++	.regs = mt8195_regs,
++	.spmimst_regs = mt8195_spmi_regs,
++	.soc_chan = 2,
++	.spmi_ver = 2,
++	.firmware_clocks = true,
++};
++
+ static const struct pmif_data mt8195_pmif_arb = {
+ 	.regs = mt8195_regs,
+ 	.spmimst_regs = mt8195_spmi_regs,
+@@ -685,9 +695,10 @@ static void mtk_spmi_irq_remove(struct pmif_bus *pbus)
+ static int mtk_spmi_bus_probe(struct platform_device *pdev,
+ 			      struct device_node *node,
+ 			      const struct pmif_data *pdata,
+-			      struct pmif_bus *pbus)
++			      struct pmif_bus **bus)
+ {
+ 	struct spmi_controller *ctrl;
++	struct pmif_bus *pbus;
+ 	int err, idx, bus_id, i;
+ 
+ 	if (pdata->num_spmi_buses > 1)
+@@ -722,13 +733,17 @@ static int mtk_spmi_bus_probe(struct platform_device *pdev,
+ 	if (IS_ERR(pbus->spmimst_base))
+ 		return PTR_ERR(pbus->spmimst_base);
+ 
+-	pbus->nclks = ARRAY_SIZE(pmif_clock_names);
+-	for (i = 0; i < pbus->nclks; i++) {
+-		pbus->clks[i].id = pmif_clock_names[i];
+-		pbus->clks[i].clk = of_clk_get_by_name(node, pbus->clks[i].id);
+-		if (IS_ERR(pbus->clks[i].clk))
+-			return dev_err_probe(&pdev->dev, PTR_ERR(pbus->clks[i].clk),
+-					     "Failed to get clocks\n");
++	if (!pdata->firmware_clocks || of_property_present(node, "clocks")) {
++		for (i = 0; i < ARRAY_SIZE(pmif_clock_names); i++) {
++			pbus->clks[i].id = pmif_clock_names[i];
++			pbus->clks[i].clk = of_clk_get_by_name(node, pbus->clks[i].id);
++			if (IS_ERR(pbus->clks[i].clk)) {
++				err = dev_err_probe(&pdev->dev, PTR_ERR(pbus->clks[i].clk),
++						    "Failed to get clocks\n");
++				goto err_put_clks;
++			}
++			pbus->nclks++;
++		}
+ 	}
+ 
+ 	err = clk_bulk_prepare_enable(pbus->nclks, pbus->clks);
+@@ -757,6 +772,7 @@ static int mtk_spmi_bus_probe(struct platform_device *pdev,
+ 
+ 	if (pbus->dom)
+ 		irq_set_chained_handler_and_data(pbus->irq, mtk_spmi_handle_chained_irq, pbus);
++	*bus = pbus;
+ 
+ 	return 0;
+ 
+@@ -789,6 +805,13 @@ static int mtk_spmi_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, arb);
+ 
++	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
++	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
++	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
++	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
++	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
++	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
++
+ 	if (!arb->data->num_spmi_buses) {
+ 		ret = mtk_spmi_bus_probe(pdev, node, arb->data, &arb->bus[cur_bus]);
+ 		if (ret)
+@@ -806,12 +829,6 @@ static int mtk_spmi_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
+-	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
+-	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
+-	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
+-	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
+-	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
+-	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
+ 
+ 	return 0;
+ }
+@@ -822,9 +839,9 @@ static void mtk_spmi_remove(struct platform_device *pdev)
+ 	int i;
+ 
+ 	for (i = 0; i < PMIF_MAX_BUSES; i++) {
+-		struct pmif_bus *pbus = &arb->bus[i];
++		struct pmif_bus *pbus = arb->bus[i];
+ 
+-		if (!pbus->ctrl)
++		if (!pbus)
+ 			continue;
+ 
+ 		mtk_spmi_irq_remove(pbus);
+@@ -838,6 +855,9 @@ static const struct of_device_id mtk_spmi_match_table[] = {
+ 	{
+ 		.compatible = "mediatek,mt6873-spmi",
+ 		.data = &mt6873_pmif_arb,
++	}, {
++		.compatible = "mediatek,mt6878-spmi",
++		.data = &mt6878_pmif_arb,
+ 	}, {
+ 		.compatible = "mediatek,mt8195-spmi",
+ 		.data = &mt8195_pmif_arb,
+diff --git a/drivers/regulator/mt636x-rf-regulator.c b/drivers/regulator/mt636x-rf-regulator.c
+new file mode 100644
+index 000000000..e24602527
+--- /dev/null
++++ b/drivers/regulator/mt636x-rf-regulator.c
+@@ -0,0 +1,186 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* RF LDO register and voltage data from the MediaTek MT6363/MT6369 vendor drivers. */
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/spmi.h>
++
++#define MT636X_SWCID		0x000b
++#define MT636X_LDO_ENABLE	BIT(0)
++#define MT636X_LDO_LOW_POWER	BIT(1)
++#define MT636X_LDO_VOSEL	GENMASK(3, 0)
++
++struct mt636x_rf_chip {
++	const struct regulator_desc *rails;
++	unsigned int count;
++};
++
++static const unsigned int mt6363_vcn13_uv[] = {
++	900000, 1000000, 1100000, 1200000, 1300000, 1700000, 1800000, 1810000,
++};
++
++static const unsigned int mt636x_rfio_uv[] = {
++	600000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000,
++	1400000, 1500000, 1600000, 1700000, 1800000, 1900000, 2000000, 2100000,
++};
++
++static const unsigned int mt6369_vcn33_uv[] = {
++	1200000, 1300000, 1500000, 1700000, 1800000, 2000000, 2500000, 2600000,
++	2700000, 2800000, 2900000, 3000000, 3100000, 3300000, 3400000, 3500000,
++};
++
++static unsigned int mt636x_rf_map_mode(unsigned int mode)
++{
++	switch (mode) {
++	case 0:
++		return REGULATOR_MODE_NORMAL;
++	case 2:
++		return REGULATOR_MODE_IDLE;
++	default:
++		return REGULATOR_MODE_INVALID;
++	}
++}
++
++static unsigned int mt636x_rf_get_mode(struct regulator_dev *rdev)
++{
++	unsigned int value;
++	int ret;
++
++	ret = regmap_read(rdev->regmap, rdev->desc->enable_reg, &value);
++	if (ret)
++		return REGULATOR_MODE_INVALID;
++
++	return value & MT636X_LDO_LOW_POWER ? REGULATOR_MODE_IDLE : REGULATOR_MODE_NORMAL;
++}
++
++static int mt636x_rf_set_mode(struct regulator_dev *rdev, unsigned int mode)
++{
++	int ret;
++	bool changed;
++
++	if (mode != REGULATOR_MODE_NORMAL && mode != REGULATOR_MODE_IDLE)
++		return -EINVAL;
++
++	ret = regmap_update_bits_check(rdev->regmap, rdev->desc->enable_reg,
++				       MT636X_LDO_LOW_POWER,
++				       mode == REGULATOR_MODE_IDLE ? MT636X_LDO_LOW_POWER : 0,
++				       &changed);
++	if (!ret && changed && mode == REGULATOR_MODE_NORMAL)
++		udelay(100);
++
++	return ret;
++}
++
++static const struct regulator_ops mt636x_rf_ops = {
++	.enable = regulator_enable_regmap,
++	.disable = regulator_disable_regmap,
++	.is_enabled = regulator_is_enabled_regmap,
++	.list_voltage = regulator_list_voltage_table,
++	.map_voltage = regulator_map_voltage_iterate,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.get_mode = mt636x_rf_get_mode,
++	.set_mode = mt636x_rf_set_mode,
++};
++
++#define MT636X_RF_LDO(_id, _name, _control, _selector, _voltages) { \
++	.id = (_id), .name = (_name), .of_match = (_name), \
++	.regulators_node = "regulators", .type = REGULATOR_VOLTAGE, \
++	.owner = THIS_MODULE, .ops = &mt636x_rf_ops, \
++	.enable_reg = (_control), .enable_mask = MT636X_LDO_ENABLE, \
++	.vsel_reg = (_selector), .vsel_mask = MT636X_LDO_VOSEL, \
++	.volt_table = (_voltages), .n_voltages = ARRAY_SIZE(_voltages), \
++	.of_map_mode = mt636x_rf_map_mode, \
++}
++
++static const struct regulator_desc mt6363_rf_rails[] = {
++	MT636X_RF_LDO(0, "vcn13", 0x1d07, 0x1b3f, mt6363_vcn13_uv),
++	MT636X_RF_LDO(1, "vrfio18", 0x1bcd, 0x1f2c, mt636x_rfio_uv),
++};
++
++static const struct regulator_desc mt6369_rf_rails[] = {
++	MT636X_RF_LDO(0, "vcn33-1", 0x1c3f, 0x1db1, mt6369_vcn33_uv),
++	MT636X_RF_LDO(1, "vcn33-2", 0x1c4d, 0x1db5, mt6369_vcn33_uv),
++	MT636X_RF_LDO(2, "vant18", 0x1cb2, 0x1e09, mt636x_rfio_uv),
++};
++
++static const struct mt636x_rf_chip mt6363_rf = {
++	.rails = mt6363_rf_rails, .count = ARRAY_SIZE(mt6363_rf_rails),
++};
++
++static const struct mt636x_rf_chip mt6369_rf = {
++	.rails = mt6369_rf_rails, .count = ARRAY_SIZE(mt6369_rf_rails),
++};
++
++static const struct regmap_config mt636x_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = 0xffff,
++	.fast_io = true,
++};
++
++static int mt636x_rf_probe(struct spmi_device *sdev)
++{
++	struct device *dev = &sdev->dev;
++	const struct mt636x_rf_chip *chip = device_get_match_data(dev);
++	struct device_node *regulators __free(device_node) = NULL;
++	struct regulator_config config = { .dev = dev };
++	unsigned int chip_id, i;
++	int ret;
++
++	if (!chip)
++		return -ENODEV;
++
++	regulators = of_get_child_by_name(dev->of_node, "regulators");
++	if (!regulators)
++		return dev_err_probe(dev, -EINVAL, "Missing RF regulators\n");
++
++	config.regmap = devm_regmap_init_spmi_ext(sdev, &mt636x_regmap_config);
++	if (IS_ERR(config.regmap))
++		return dev_err_probe(dev, PTR_ERR(config.regmap), "Cannot create PMIC regmap\n");
++
++	ret = regmap_read(config.regmap, MT636X_SWCID, &chip_id);
++	if (ret || !chip_id)
++		return dev_err_probe(dev, ret ?: -ENODEV, "Cannot read PMIC chip ID\n");
++
++	for (i = 0; i < chip->count; i++) {
++		const struct regulator_desc *rail = &chip->rails[i];
++		struct device_node *node __free(device_node) =
++			of_get_child_by_name(regulators, rail->of_match);
++		struct regulator_dev *rdev;
++
++		if (!node || !of_device_is_available(node))
++			continue;
++
++		rdev = devm_regulator_register(dev, rail, &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev), "Cannot register %s\n", rail->name);
++	}
++
++	/* Connectivity children use this parent's byte-addressed PMIC regmap. */
++	return devm_of_platform_populate(dev);
++}
++
++static const struct of_device_id mt636x_rf_of_match[] = {
++	{ .compatible = "mediatek,mt6363-rf-regulators", .data = &mt6363_rf },
++	{ .compatible = "mediatek,mt6369-rf-regulators", .data = &mt6369_rf },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mt636x_rf_of_match);
++
++static struct spmi_driver mt636x_rf_driver = {
++	.probe = mt636x_rf_probe,
++	.driver = {
++		.name = "mt636x-rf-regulator",
++		.of_match_table = mt636x_rf_of_match,
++	},
++};
++module_spmi_driver(mt636x_rf_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6363 and MT6369 RF regulator driver");
++MODULE_LICENSE("GPL");

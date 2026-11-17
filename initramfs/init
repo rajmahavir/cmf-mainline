@@ -1,0 +1,107 @@
+#!/bin/busybox sh
+# CMF Phone 1 mainline diagnostic v9 init
+# v8 fix: PATH is unset in an initramfs, so `setsid sh` failed with
+#   "can't execute 'sh'". Busybox applets still ran because the shell resolves
+#   them internally, which masked the problem. v9 exports PATH and invokes the
+#   shell by absolute path.
+# One USB ACM function only (macOS binds single-function CDC ACM reliably).
+/bin/busybox --install -s /bin 2>/dev/null
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /sys/kernel/config /sys/fs/pstore /tmp /run
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t configfs configfs /sys/kernel/config 2>/dev/null
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+
+exec >/dev/kmsg 2>&1 </dev/null
+
+echo "<6>=== MAINLINE 7.2 V9 INITRAMFS REACHED ==="
+uname -a
+
+if [ -c /dev/tty0 ]; then
+    {
+        echo "=========================================="
+        echo "  NOTHING CMF PHONE 1 - MAINLINE 7.2 (v9)"
+        echo "  Kernel: $(uname -r)"
+        echo "  USB: single ACM console"
+        echo "=========================================="
+        dmesg | tail -n 25
+    } > /dev/tty0 2>/dev/null
+fi
+
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p "$G"
+cd "$G" 2>/dev/null
+
+if [ -d "$G" ]; then
+    echo 0x1d6b > idVendor
+    echo 0x0104 > idProduct
+    echo 0x0100 > bcdDevice
+    echo 0x0200 > bcdUSB
+
+    mkdir -p strings/0x409
+    echo "0123456789" > strings/0x409/serialnumber
+    echo "Nothing" > strings/0x409/manufacturer
+    echo "CMF-Mainline-Diagnostic-v9" > strings/0x409/product
+
+    mkdir -p configs/c.1/strings/0x409
+    echo "ACM" > configs/c.1/strings/0x409/configuration
+    echo 250 > configs/c.1/MaxPower
+
+    mkdir -p functions/acm.gs0
+    ln -sf functions/acm.gs0 configs/c.1/acm.gs0
+fi
+
+i=0
+UDC=""
+while [ $i -lt 10 ]; do
+    UDC=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+    [ -n "$UDC" ] && break
+    sleep 1
+    i=$((i + 1))
+done
+
+if [ -n "$UDC" ]; then
+    echo "<6>initramfs: UDC=$UDC"
+    echo "$UDC" > "$G/UDC" 2>/dev/null
+    echo "<6>initramfs: gadget bound to $(cat "$G/UDC" 2>/dev/null)"
+else
+    echo "<3>initramfs: no UDC after 10s (expected under QEMU)"
+fi
+
+i=0
+while [ $i -lt 20 ]; do
+    [ -c /dev/ttyGS0 ] && break
+    sleep 1
+    i=$((i + 1))
+done
+
+if [ -c /dev/ttyGS0 ]; then
+    echo "<6>initramfs: ACM console ready on /dev/ttyGS0"
+    # Resolve the shell once, by absolute path; never trust PATH here.
+    SH=/bin/sh
+    [ -x "$SH" ] || SH=/bin/busybox
+    echo "<6>initramfs: shell binary = $SH"
+    (
+        dmesg > /dev/ttyGS0 2>/dev/null
+        while true; do
+            printf '\r\n=== CMF mainline v9 shell (%s) — type commands ===\r\n' "$SH" > /dev/ttyGS0 2>/dev/null
+            setsid "$SH" -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1
+            printf '\r\n=== shell exited, respawning in 2s ===\r\n' > /dev/ttyGS0 2>/dev/null
+            sleep 2
+        done
+    ) &
+else
+    echo "<3>initramfs: no ACM console port"
+fi
+
+while true; do
+    sleep 30
+    if [ -c /dev/tty0 ]; then
+        dmesg | tail -n 12 > /dev/tty0 2>/dev/null
+    fi
+done

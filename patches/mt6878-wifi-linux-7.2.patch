@@ -1,0 +1,2405 @@
+diff --git a/vendor/mediatek/kernel_modules/connectivity/connfem/Kbuild b/vendor/mediatek/kernel_modules/connectivity/connfem/Kbuild
+--- a/vendor/mediatek/kernel_modules/connectivity/connfem/Kbuild
++++ b/vendor/mediatek/kernel_modules/connectivity/connfem/Kbuild
+@@ -41,7 +41,7 @@
+ ###############################################################################
+ # Include Paths
+ ###############################################################################
+-KO_CODE_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++KO_CODE_PATH := $(abspath $(src))
+ 
+ ccflags-y += -I$(KO_CODE_PATH)/include
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_dt_parser.c b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_dt_parser.c
+--- a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_dt_parser.c
++++ b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_dt_parser.c
+@@ -4,10 +4,11 @@
+  */
+ 
+ #include <linux/kernel.h>
++#include <linux/of.h>
+ #include <linux/of_platform.h>
+ #include <linux/of_device.h>
+ #include <linux/platform_device.h>
+-#include <linux/of_gpio.h>
++#include <linux/gpio/consumer.h>
+ #include <linux/pinctrl/consumer.h>
+ #include <linux/iio/consumer.h>
+ #include <linux/slab.h>
+@@ -620,10 +621,9 @@
+ 				     unsigned int *hwid_out,
+ 				     unsigned int *nbits_out)
+ {
+-	int i, cnt = 0, gpio_num;
++	int i, cnt;
+ 	unsigned int hwid = 0;
+ 	unsigned int consumed_bits = 0;
+-	unsigned int gpio_value = 0;
+ 
+ 	/* CFM_DT_PROP_GPIO_CELLS (#gpio-cells) is defined in mtXXXX.dts
+ 	 * In the normal case, it should be 2. Hence, dts needs to be set
+@@ -642,27 +642,25 @@
+ 	if (cnt <= 0)
+ 		return -ENOENT;
+ 
+-	/* Retrieve hardware ID based on GPIO PIN(s) value */
++	if (cnt > BITS_PER_TYPE(hwid))
++		return -EINVAL;
++
++	/* The existing DT puts the board-ID inputs in an unnamed gpio list. */
+ 	for (i = 0; i < cnt; i++) {
+-		/* Retrieve GPIO PIN number */
+-		gpio_num = of_get_named_gpio(np, CFM_DT_PROP_GPIO, i);
+-
+-		/* Abort if it's not valid */
+-		if (!gpio_is_valid(gpio_num)) {
+-			pr_info("Invalid '%s' property: idx(%d)err(%d)",
+-				CFM_DT_NODE_HWID,
+-				i, gpio_num);
+-			hwid = 0;
+-			return -EINVAL;
+-		}
+-
+-		/* Read GPIO PIN */
+-		gpio_value = gpio_get_value(gpio_num);
+-		hwid |= ((gpio_value & 0x1) << i);
+-		pr_info("%s[%d]: GPIO(%d)=%d, hwid(%u)",
+-			CFM_DT_NODE_HWID, i,
+-			gpio_num, gpio_value, hwid);
+-
++		struct gpio_desc *desc;
++		int gpio_value;
++
++		desc = fwnode_gpiod_get_index(of_fwnode_handle(np), NULL, i,
++					     GPIOD_ASIS, "connfem-hwid");
++		if (IS_ERR(desc))
++			return PTR_ERR(desc);
++
++		gpio_value = gpiod_get_raw_value_cansleep(desc);
++		gpiod_put(desc);
++		if (gpio_value < 0)
++			return gpio_value;
++
++		hwid |= (unsigned int)(gpio_value & 1) << i;
+ 		consumed_bits++;
+ 	}
+ 
+@@ -1547,10 +1545,7 @@
+ 
+ 	memset(&flags, 0, sizeof(flags));
+ 
+-	strncpy(flags.node_name, hw_name,
+-		sizeof(flags.node_name) - 1);
+-
+-	flags.node_name[sizeof(flags.node_name) - 1] = 0;
++	strscpy_pad(flags.node_name, hw_name, sizeof(flags.node_name));
+ 
+ 	/* Collect subsys' flags node if valid */
+ 	for (i = 0; i < CONNFEM_SUBSYS_NUM; i++) {
+diff --git a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_epaelna.c b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_epaelna.c
+--- a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_epaelna.c
++++ b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_epaelna.c
+@@ -155,9 +155,7 @@
+ 			(result.part[i].pid << fem_id_shift[i][FEMID_PID]);
+ 
+ 		/* Part name */
+-		strncpy(result.part_name[i], np->name,
+-			sizeof(result.part_name[i]) - 1);
+-		result.part_name[i][sizeof(result.part_name[i]) - 1] = 0;
++		strscpy_pad(result.part_name[i], np->name, sizeof(result.part_name[i]));
+ 	}
+ 
+ 	/* Update output parameter */
+diff --git a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_module.c b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_module.c
+--- a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_module.c
++++ b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_module.c
+@@ -42,7 +42,7 @@
+  *		    F U N C T I O N   D E C L A R A T I O N S
+  ******************************************************************************/
+ static int connfem_plat_probe(struct platform_device *pdev);
+-static int connfem_plat_remove(struct platform_device *pdev);
++static void connfem_plat_remove(struct platform_device *pdev);
+ static void connfem_cfg_dt_check(struct platform_device *pdev,
+ 		void *ctx, struct connfem_context_ops *ops);
+ static enum connfem_type connfem_type_get(struct device_node *dn);
+@@ -666,8 +666,7 @@
+ 		return -EOPNOTSUPP;
+ 	}
+ 
+-	strncpy(data.name, hw_name, sizeof(hw_name) - 1);
+-	data.name[sizeof(data.name) - 1] = 0;
++	strscpy_pad(data.name, hw_name, sizeof(data.name));
+ 	data.len = strlen(data.name);
+ 
+ 	pr_info("%s: copy '%s'(len:%zu)",
+@@ -921,27 +920,25 @@
+ 	return err;
+ }
+ 
+-static int connfem_plat_remove(struct platform_device *pdev)
++static void connfem_plat_remove(struct platform_device *pdev)
+ {
+ 	struct connfem_context_ops *ops = NULL;
+ 
+ 	if (!of_match_device(of_match_ptr(connfem_of_ids), &pdev->dev)) {
+ 		pr_info("Remove, missing platform device data for '%s'",
+ 			pdev->name);
+-		return -EOPNOTSUPP;
++		return;
+ 	}
+ 
+ 	if (!connfem_ctx) {
+ 		pr_info("Remove, no connfem_ctx alive for '%s'",
+ 			pdev->name);
+-		return 0;
++		return;
+ 	}
+ 
+ 	ops = (struct connfem_context_ops *)connfem_ctx;
+ 	ops->free(connfem_ctx);
+ 	connfem_ctx = NULL;
+-
+-	return 0;
+ }
+ 
+ static int __init connfem_mod_init(void)
+diff --git a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_sku.c b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_sku.c
+--- a/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_sku.c
++++ b/vendor/mediatek/kernel_modules/connectivity/connfem/connfem_sku.c
+@@ -731,7 +731,6 @@
+ {
+ 	int err = 0;
+ 	unsigned int value = 0;
+-	const __be32 *p;
+ 	struct property *prop;
+ 	unsigned int bk_cnt = 0;
+ 
+@@ -759,12 +758,7 @@
+ 		goto dt_fem_states_err;
+ 	}
+ 
+-	of_property_for_each_u32(np, CFM_DT_PROP_STATES, prop, p, value) {
+-		if (!p) {
+-			pr_info("Error when iterating property '%s'",
+-				CFM_DT_PROP_STATES);
+-			goto dt_fem_states_err;
+-		}
++	of_property_for_each_u32(np, CFM_DT_PROP_STATES, value) {
+ 
+ 		cat->op[cat->op_count] = value;
+ 		cat->op_count++;
+@@ -791,7 +785,6 @@
+ 		struct connfem_sku_fem_ctrlpin *ctrl_pin)
+ {
+ 	unsigned int value = 0;
+-	const __be32 *p;
+ 	struct property *prop;
+ 	unsigned int bk_cnt = 0;
+ 
+@@ -808,14 +801,7 @@
+ 	}
+ 
+ 	/* Iterate pins elements and populate */
+-	of_property_for_each_u32(np, CFM_DT_PROP_PINS, prop, p, value) {
+-		if (!p) {
+-			pr_info("Error when iterating property '%s', "
+-				"idx '%d'",
+-				CFM_DT_PROP_PINS,
+-				ctrl_pin->count);
+-			goto dt_fem_ctrl_pin_err;
+-		}
++	of_property_for_each_u32(np, CFM_DT_PROP_PINS, value) {
+ 
+ 		if (ctrl_pin->count >= CONNFEM_FEM_PIN_COUNT) {
+ 			pr_info("Over max supportable number %d of %s",
+@@ -950,10 +936,7 @@
+ 	}
+ 
+ 	/* Populate name */
+-	strncpy(fem_info->name, np->name,
+-		sizeof(fem_info->name) - 1);
+-
+-	fem_info->name[sizeof(fem_info->name) - 1] = 0;
++	strscpy_pad(fem_info->name, np->name, sizeof(fem_info->name));
+ 
+ 	/* Populate vid */
+ 	err = of_property_read_u32(np, CFM_DT_PROP_VID, &value);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/Kbuild b/vendor/mediatek/kernel_modules/connectivity/conninfra/Kbuild
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/Kbuild
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/Kbuild
+@@ -46,7 +46,7 @@
+ ccflags-y += -Wno-error=format-extra-args
+ 
+ ###############################################################################
+-KO_CODE_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++KO_CODE_PATH := $(abspath $(src))
+ 
+ MODULE_NAME := conninfra
+ ifeq ($(CONFIG_WLAN_DRV_BUILD_IN),y)
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/conninfra_dev.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/conninfra_dev.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/conninfra_dev.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/conninfra_dev.c
+@@ -587,7 +587,7 @@
+ 		goto err1;
+ 	}
+ 
+-	p_conn_adaptor_class = class_create(THIS_MODULE, CONNINFRA_DEVICE_NAME);
++	p_conn_adaptor_class = class_create(CONNINFRA_DEVICE_NAME);
+ 	if (IS_ERR(p_conn_adaptor_class)) {
+ 		pr_err("class create fail, error code(%ld)\n",
+ 						PTR_ERR(p_conn_adaptor_class));
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/connsyslog/fw_log_mcu.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/connsyslog/fw_log_mcu.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/connsyslog/fw_log_mcu.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/adaptor/connsyslog/fw_log_mcu.c
+@@ -46,7 +46,7 @@
+ 		goto error;
+ 	}
+ 
+-	info->mcu_class = class_create(THIS_MODULE, info->driver_name);
++	info->mcu_class = class_create(info->driver_name);
+ 	if (IS_ERR(info->mcu_class)) {
+ 		pr_notice("[%s] class_create fail, conn_type=[%d]\n", __func__, info->conn_type);
+ 		goto error;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/base/include/osal.h b/vendor/mediatek/kernel_modules/connectivity/conninfra/base/include/osal.h
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/base/include/osal.h
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/base/include/osal.h
+@@ -132,7 +132,7 @@
+ typedef struct timer_list *timer_handler_arg;
+ #define GET_HANDLER_DATA(arg, data) \
+ do { \
+-	P_OSAL_TIMER osal_timer = from_timer(osal_timer, arg, timer); \
++	P_OSAL_TIMER osal_timer = timer_container_of(osal_timer, arg, timer); \
+ 	data = osal_timer->timeroutHandlerData; \
+ } while (0)
+ #else
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/base/osal.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/base/osal.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/base/osal.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/base/osal.c
+@@ -41,6 +41,7 @@
+ #include <linux/vmalloc.h>
+ #include <asm/current.h>
+ #include <linux/kfifo.h>
++#include <linux/string.h>
+ #if defined(CONNINFRA_PLAT_ALPS) && CONNINFRA_PLAT_ALPS
+ #include "connectivity_build_in_adapter.h"
+ #endif
+@@ -95,12 +96,16 @@
+ 
+ char *osal_strcpy(char *dst, const char *src)
+ {
+-	return strncpy(dst, src, strlen(src)+1);
++	return memcpy(dst, src, strlen(src) + 1);
+ }
+ 
+ char *osal_strncpy(char *dst, const char *src, unsigned int len)
+ {
+-	return strncpy(dst, src, len);
++	size_t copied = strnlen(src, len);
++
++	memcpy(dst, src, copied);
++	memset(dst + copied, 0, len - copied);
++	return dst;
+ }
+ 
+ char *osal_strcat(char *dst, const char *src)
+@@ -724,7 +729,7 @@
+ {
+ 	struct timer_list *timer = &pTimer->timer;
+ 
+-	del_timer(timer);
++	timer_delete(timer);
+ 	return 0;
+ }
+ 
+@@ -732,7 +737,7 @@
+ {
+ 	struct timer_list *timer = &pTimer->timer;
+ 
+-	del_timer_sync(timer);
++	timer_delete_sync(timer);
+ 	return 0;
+ }
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/conninfra_dbg.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/conninfra_dbg.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/conninfra_dbg.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/conninfra_dbg.c
+@@ -215,7 +215,7 @@
+ 		sz = strlen(buf);
+ 		sz = (sz < CONNINFRA_DBG_DUMP_BUF_SIZE - g_dump_buf_len - 1) ?
+ 				sz : CONNINFRA_DBG_DUMP_BUF_SIZE - g_dump_buf_len - 1;
+-		strncpy(g_dump_buf + g_dump_buf_len, buf, sz);
++		memcpy(g_dump_buf + g_dump_buf_len, buf, sz);
+ 		g_dump_buf_len += sz;
+ 		if (g_dump_buf_len >= 0)
+ 			g_dump_buf[g_dump_buf_len] = '\0';
+@@ -576,7 +576,7 @@
+ 		sz = strlen(buf);
+ 		sz = (sz < CONNINFRA_DBG_DUMP_BUF_SIZE - g_dump_buf_len -1) ?
+ 			sz : CONNINFRA_DBG_DUMP_BUF_SIZE - g_dump_buf_len - 1;
+-		strncpy(g_dump_buf + g_dump_buf_len, buf, sz);
++		memcpy(g_dump_buf + g_dump_buf_len, buf, sz);
+ 		g_dump_buf_len += sz;
+ 		if (g_dump_buf_len >= 0)
+ 			g_dump_buf[g_dump_buf_len] = '\0';
+@@ -917,7 +917,7 @@
+ 		sz = strlen(buf);
+ 		sz = (sz < CONNINFRA_DBG_DUMP_BUF_SIZE - g_dump_buf_len -1) ?
+ 			sz : CONNINFRA_DBG_DUMP_BUF_SIZE - g_dump_buf_len - 1;
+-		strncpy(g_dump_buf + g_dump_buf_len, buf, sz);
++		memcpy(g_dump_buf + g_dump_buf_len, buf, sz);
+ 		g_dump_buf_len += sz;
+ 		if (g_dump_buf_len >= 0)
+ 			g_dump_buf[g_dump_buf_len] = '\0';
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/connsyslog/connsyslog.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/connsyslog/connsyslog.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/connsyslog/connsyslog.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/connsyslog/connsyslog.c
+@@ -6,6 +6,7 @@
+ *                    E X T E R N A L   R E F E R E N C E S
+ ********************************************************************************
+ */
++#include <linux/vmalloc.h>
+ #include <linux/spinlock.h>
+ #include <linux/slab.h>
+ #include <linux/uaccess.h>
+@@ -1373,7 +1374,7 @@
+ 	ktime_t kt;
+ 
+ 	kt = ktime_set(gLogAlarm.alarm_sec, 0);
+-	alarm_start_relative(&gLogAlarm.alarm_timer, kt);
++	alarm_start_timer(&gLogAlarm.alarm_timer, kt, true);
+ 
+ 	pr_info("[connsys_log_alarm] alarm timer enabled timeout=[%d]", gLogAlarm.alarm_sec);
+ 	return 0;
+@@ -1386,7 +1387,7 @@
+ }
+ 
+ 
+-static enum alarmtimer_restart connlog_alarm_timer_handler(struct alarm *alarm,
++static void connlog_alarm_timer_handler(struct alarm *alarm,
+ 	ktime_t now)
+ {
+ 	ktime_t kt;
+@@ -1408,10 +1409,9 @@
+ 
+ 	spin_lock_irqsave(&gLogAlarm.alarm_lock, gLogAlarm.flags);
+ 	kt = ktime_set(gLogAlarm.alarm_sec, 0);
+-	alarm_start_relative(&gLogAlarm.alarm_timer, kt);
++	alarm_start_timer(&gLogAlarm.alarm_timer, kt, true);
+ 	spin_unlock_irqrestore(&gLogAlarm.alarm_lock, gLogAlarm.flags);
+ 
+-	return ALARMTIMER_NORESTART;
+ }
+ 
+ static int connlog_alarm_init(void)
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/coredump/connsys_coredump.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/coredump/connsys_coredump.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/coredump/connsys_coredump.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/debug_utility/coredump/connsys_coredump.c
+@@ -8,6 +8,7 @@
+ ********************************************************************************
+ */
+ 
++#include <linux/vmalloc.h>
+ #include <linux/completion.h>
+ #include <linux/delay.h>
+ #include <linux/io.h>
+@@ -849,7 +850,7 @@
+ 	/* Store first several characters */
+ 	len = strlen(ctx->page_dump_buf);
+ 	len = (len >= CONNSYS_DUMP_INFO_SIZE) ? CONNSYS_DUMP_INFO_SIZE - 1 : len;
+-	strncpy(ctx->info.dump_info, ctx->page_dump_buf, CONNSYS_DUMP_INFO_SIZE);
++	osal_strncpy(ctx->info.dump_info, ctx->page_dump_buf, CONNSYS_DUMP_INFO_SIZE);
+ 	ctx->info.dump_info[len] = '\0';
+ }
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/include/connsys_smc.h b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/include/connsys_smc.h
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/include/connsys_smc.h
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/include/connsys_smc.h
+@@ -7,6 +7,11 @@
+ #define CONNSYS_SMC_H
+ 
+ #include "plat_def.h"
++
++/* MT6878 stock MediaTek SiP service number. */
++#ifndef MTK_SIP_KERNEL_CONNSYS_CONTROL
++#define MTK_SIP_KERNEL_CONNSYS_CONTROL MTK_SIP_SMC_CMD(0x534)
++#endif
+ 
+ #define CONNSYS_SMC_CALL_VOID(OPID, x2, x3, x4, x5, x6, x7) \
+ struct arm_smccc_res res; \
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/mt6878/mt6878_emi.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/mt6878/mt6878_emi.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/mt6878/mt6878_emi.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/platform/mt6878/mt6878_emi.c
+@@ -10,14 +10,10 @@
+ #include "include/mt6878_emi.h"
+ #include "include/mt6878_pos.h"
+ 
+-/* For EMI MPU */
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0))
+-#include <soc/mediatek/emi.h>
+-#else
+-#include <memory/mediatek/emi.h>
++/* Optional modem shared memory is provided by the vendor ECCCI driver. */
++#if IS_ENABLED(CONFIG_MTK_ECCCI_DRIVER)
++#include <mtk_ccci_common.h>
+ #endif
+-/* For MCIF */
+-#include <mtk_ccci_common.h>
+ /*******************************************************************************
+ *                         C O M P I L E R   F L A G S
+ ********************************************************************************
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/src/connv2_drv.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/src/connv2_drv.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/src/connv2_drv.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv2/src/connv2_drv.c
+@@ -74,7 +74,7 @@
+ extern const struct of_device_id apconninfra_of_ids[];
+ 
+ static int mtk_conninfra_probe(struct platform_device *pdev);
+-static int mtk_conninfra_remove(struct platform_device *pdev);
++static void mtk_conninfra_remove(struct platform_device *pdev);
+ 
+ static struct platform_driver mtk_conninfra_dev_drv = {
+ 	.probe = mtk_conninfra_probe,
+@@ -626,14 +626,11 @@
+ 	return 0;
+ }
+ 
+-int mtk_conninfra_remove(struct platform_device *pdev)
++static void mtk_conninfra_remove(struct platform_device *pdev)
+ {
+ 	atomic_set(&g_connv2_hw_init_done, 0);
+ 	consys_hw_deinit();
+-	if (g_drv_dev)
+-		g_drv_dev = NULL;
+-
+-	return 0;
++	g_drv_dev = NULL;
+ }
+ 
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/debug_utility/coredump/connv3_coredump.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/debug_utility/coredump/connv3_coredump.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/debug_utility/coredump/connv3_coredump.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/debug_utility/coredump/connv3_coredump.c
+@@ -382,7 +382,7 @@
+ 			if (task_end != NULL) {
+ 				unsigned int task_len = ((task_end - pTemp) > CONNV3_TASK_NAME_SIZE - 1 ? CONNV3_TASK_NAME_SIZE - 1 : (task_end - pTemp));
+ 				char task_name[CONNV3_TASK_NAME_SIZE];
+-				strncpy(task_name, pTemp, task_len);
++				osal_strncpy(task_name, pTemp, task_len);
+ 				task_name[task_len] = '\0';
+ 
+ 				if (snprintf(ctx->issue_info.task_name, CONNV3_TASK_NAME_SIZE,
+@@ -457,7 +457,7 @@
+ 		}
+ 	}
+ 	if (reason != NULL) {
+-		strncpy(ctx->issue_info.reason, reason, CONNV3_ASSERT_REASON_SIZE - 1);
++		osal_strncpy(ctx->issue_info.reason, reason, CONNV3_ASSERT_REASON_SIZE - 1);
+ 	}
+ 	if (snprintf(ctx->issue_info.subsys_tag, CONNV3_SUBSYS_TAG_SIZE, "%s", connv3_dump_mng_get_subsys_tag(ctx->conn_type)) < 0) {
+ 		pr_notice("[%s] snprintf failed\n", __func__);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/src/connv3_drv.c b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/src/connv3_drv.c
+--- a/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/src/connv3_drv.c
++++ b/vendor/mediatek/kernel_modules/connectivity/conninfra/conn_drv/connv3/src/connv3_drv.c
+@@ -62,7 +62,7 @@
+ extern const struct of_device_id connv3_of_ids[];
+ 
+ static int mtk_connv3_probe(struct platform_device *pdev);
+-static int mtk_connv3_remove(struct platform_device *pdev);
++static void mtk_connv3_remove(struct platform_device *pdev);
+ 
+ static struct platform_driver g_mtk_connv3_dev_drv = {
+ 	.probe = mtk_connv3_probe,
+@@ -291,7 +291,7 @@
+ 	return 0;
+ }
+ 
+-int mtk_connv3_remove(struct platform_device *pdev)
++static void mtk_connv3_remove(struct platform_device *pdev)
+ {
+ 	atomic_set(&g_connv3_hw_init_done, 0);
+ 
+@@ -300,7 +300,6 @@
+ 	if (g_connv3_drv_dev)
+ 		g_connv3_drv_dev = NULL;
+ 
+-	return 0;
+ }
+ 
+ /* put log/variable to file node */
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/adaptor/wmt_cdev_wifi.c b/vendor/mediatek/kernel_modules/connectivity/wlan/adaptor/wmt_cdev_wifi.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/adaptor/wmt_cdev_wifi.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/adaptor/wmt_cdev_wifi.c
+@@ -829,7 +829,7 @@
+ 		goto error;
+ 
+ #if CREATE_NODE_DYNAMIC	/* mknod replace */
+-	wmtwifi_class = class_create(THIS_MODULE, "wmtWifi");
++	wmtwifi_class = class_create("wmtWifi");
+ 	if (IS_ERR(wmtwifi_class))
+ 		goto error;
+ 	wmtwifi_dev = device_create(wmtwifi_class, NULL, wifi_devno, NULL,
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild
+@@ -6,7 +6,7 @@
+ 
+ ifeq ($(SEGMENT), SP)
+     # build ko by connac version
+-    KO_CODE_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++    KO_CODE_PATH := $(abspath $(src))
+     ifeq ($(MODULE_NAME), wlan_drv_gen4m_eap_6639)
+         include $(KO_CODE_PATH)/Kbuild.eap_6639
+     else ifeq ($(MODULE_NAME), wlan_drv_gen4m_6985_6639)
+@@ -27,7 +27,7 @@
+         include $(KO_CODE_PATH)/Kbuild.6878
+     endif
+ else
+-    KO_CODE_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++    KO_CODE_PATH := $(abspath $(src))
+ 
+     include $(KO_CODE_PATH)/Kbuild.main
+ endif
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.6878 b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.6878
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.6878
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.6878
+@@ -1,5 +1,5 @@
+ # Sources path
+-KO_CODE_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++KO_CODE_PATH := $(abspath $(src))
+ 
+ # KO specfied attributes
+ WLAN_CHIP_ID := 6878
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.main b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.main
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.main
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/Kbuild.main
+@@ -5,7 +5,7 @@
+ LINUXINCLUDE := $(DEVCIE_MODULES_INCLUDE) $(LINUXINCLUDE)
+ TOP := $(srctree)/..
+ endif
+-KO_PATH := $(if $(filter /%,$(src)),,$(srctree)/)$(src)
++KO_PATH := $(abspath $(src))
+ 
+ ccflags-y :=
+ CFG_DIR ?= $(KO_CODE_PATH)/configs
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/common/wlan_lib.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/common/wlan_lib.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/common/wlan_lib.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/common/wlan_lib.c
+@@ -9552,7 +9552,7 @@
+ 	}
+ 
+ 	cmd_v1.itemStringLength = args_size[ED_STRING_SITE];
+-	strncpy(cmd_v1.itemString, args[ED_STRING_SITE],
++	kalStrnCpy(cmd_v1.itemString, args[ED_STRING_SITE],
+ 		cmd_v1.itemStringLength);
+ 	DBGLOG(INIT, INFO, "itemString:");
+ 	for (i = 0; i < cmd_v1.itemStringLength; i++)
+@@ -9609,7 +9609,7 @@
+ 		cmd_v1.itemValueLength = bufferindex;
+ 	} else if (cmd_v1.itemType == ITEM_TYPE_STR) {
+ 		cmd_v1.itemValueLength = args_size[ED_VALUE_SITE];
+-		strncpy(cmd_v1.itemValue, args[ED_VALUE_SITE],
++		kalStrnCpy(cmd_v1.itemValue, args[ED_VALUE_SITE],
+ 			cmd_v1.itemValueLength);
+ 	}
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/mac.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/mac.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/mac.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/mac.h
+@@ -3012,7 +3012,7 @@
+ struct IE_SUPPORTED_CHANNELS {
+ 	uint8_t ucId;
+ 	uint8_t ucLength;
+-	uint8_t ucChannelNum[0];
++	uint8_t ucChannelNum[];
+ } __KAL_ATTRIB_PACKED__;
+ 
+ /* 7.3.2.20 Channel Switch Announcement element*/
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/nic_rx.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/nic_rx.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/nic_rx.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/nic/nic_rx.h
+@@ -879,7 +879,7 @@
+ struct HW_MAC_RX_REPORT {
+ 	uint32_t u4Header[RX_RPT_HDR_LEN];
+ 	uint32_t u4UserInfo[RX_RPT_USER_INFO_LEN];
+-	struct HW_MAC_RX_RPT_BLK rRxvBlk[0];
++	struct HW_MAC_RX_RPT_BLK rRxvBlk[];
+ };
+ 
+ struct SW_RFB {
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha256.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha256.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha256.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha256.h
+@@ -18,7 +18,7 @@
+ 
+ int hmac_sha256_vector(const u8 *key, size_t key_len, size_t num_elem,
+ 		       const u8 *addr[], const size_t *len, u8 *mac);
+-int hmac_sha256(const u8 *key, size_t key_len, const u8 *data,
++int mtk_wlan_hmac_sha256(const u8 *key, size_t key_len, const u8 *data,
+ 		size_t data_len, u8 *mac);
+ int sha256_prf(const u8 *key, size_t key_len, const char *label,
+ 	       const u8 *data, size_t data_len, u8 *buf, size_t buf_len);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384.h
+@@ -18,7 +18,7 @@
+ 
+ int hmac_sha384_vector(const u8 *key, size_t key_len, size_t num_elem,
+ 		       const u8 *addr[], const size_t *len, u8 *mac);
+-int hmac_sha384(const u8 *key, size_t key_len, const u8 *data,
++int mtk_wlan_hmac_sha384(const u8 *key, size_t key_len, const u8 *data,
+ 		size_t data_len, u8 *mac);
+ int sha384_prf(const u8 *key, size_t key_len, const char *label,
+ 	       const u8 *data, size_t data_len, u8 *buf, size_t buf_len);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384_i.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384_i.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384_i.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha384_i.h
+@@ -20,7 +20,7 @@
+ 
+ #define sha384_state nan_rdf_sha512_state
+ 
+-void sha384_init(struct sha384_state *md);
++void mtk_wlan_sha384_init(struct sha384_state *md);
+ int sha384_process(struct sha384_state *md, const unsigned char *in,
+ 		   unsigned long inlen);
+ int sha384_done(struct sha384_state *md, unsigned char *out);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha512_i.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha512_i.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha512_i.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/include/wpa_supp/src/crypto/sha512_i.h
+@@ -22,7 +22,7 @@
+ 	u8 buf[SHA512_BLOCK_SIZE];
+ };
+ 
+-void sha512_init(struct nan_rdf_sha512_state *md);
++void mtk_wlan_sha512_init(struct nan_rdf_sha512_state *md);
+ int sha512_process(struct nan_rdf_sha512_state *md, const unsigned char *in,
+ 		   unsigned long inlen);
+ int sha512_done(struct nan_rdf_sha512_state *md, unsigned char *out);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/fils.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/fils.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/fils.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/fils.c
+@@ -217,7 +217,7 @@
+ 	*cp = EAP_ERP_CS_HMAC_SHA256_128;
+ 	cp++;
+ 
+-	if (hmac_sha256(erp->rIK, erp->rIKLen, buf, cp - buf, hash) < 0) {
++	if (mtk_wlan_hmac_sha256(erp->rIK, erp->rIKLen, buf, cp - buf, hash) < 0) {
+ 		DBGLOG(FILS, ERROR, "sha256 failed\n");
+ 		return 0;
+ 	}
+@@ -914,10 +914,10 @@
+ 		return WLAN_STATUS_FAILURE;
+ 	}
+ 
+-	if (hmac_sha256(erp->rIK, erp->rIKLen, (const u8 *) hdr,
++	if (mtk_wlan_hmac_sha256(erp->rIK, erp->rIKLen, (const u8 *) hdr,
+ 			end - ((const u8 *) hdr) - hash_len, hash) < 0) {
+ 		DBGLOG(FILS, ERROR,
+-			   "EAP: hmac_sha256 failed\n");
++			   "EAP: mtk_wlan_hmac_sha256 failed\n");
+ 		return WLAN_STATUS_FAILURE;
+ 	}
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/p2p_func.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/p2p_func.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/p2p_func.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/p2p_func.c
+@@ -4530,8 +4530,9 @@
+ 				sizeof(struct WLAN_PUBLIC_VENDOR_ACTION_FRAME))
+ 			break;
+ 
+-		WLAN_GET_FIELD_BE24(prActFrame->ucActionDetails, &u4Oui);
+-		ucOuiType = prActFrame->ucActionDetails[3];
++		prActPubVenFrame = (struct WLAN_PUBLIC_VENDOR_ACTION_FRAME *)prActFrame;
++		WLAN_GET_FIELD_BE24(prActPubVenFrame->ucOUI, &u4Oui);
++		ucOuiType = prActPubVenFrame->ucSubType;
+ 		DBGLOG(P2P, TRACE, "Action: oui: 0x%x, type: 0x%x\n",
+ 			u4Oui, ucOuiType);
+ 
+@@ -4539,9 +4540,6 @@
+ 			break;
+ 
+ 		if (ucOuiType == P2P_OUI_TYPE) {
+-			prActPubVenFrame =
+-				(struct WLAN_PUBLIC_VENDOR_ACTION_FRAME *)
+-				prActFrame;
+ 			p2pProcessActionResponse(prAdapter,
+ 				prActPubVenFrame->ucPubSubType);
+ 			if ((prActPubVenFrame->ucPubSubType ==
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/rsn.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/rsn.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/rsn.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/mgmt/rsn.c
+@@ -1286,6 +1286,7 @@
+ 
+ void rsnAllowCrossAkm(struct ADAPTER *prAdapter, uint8_t ucBssIndex)
+ {
++#if (CFG_TC10_FEATURE == 1) || (KERNEL_VERSION(6, 10, 0) > CFG80211_VERSION_CODE)
+ 	uint8_t i;
+ 	struct IEEE_802_11_MIB *prMib;
+ 	struct DOT11_RSNA_CONFIG_AUTHENTICATION_SUITES_ENTRY *prEntry;
+@@ -1342,6 +1343,7 @@
+ 				prEntry->dot11RSNAConfigAuthenticationSuite);
+ 		}
+ 	}
++#endif
+ #endif
+ }
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nanScheduler.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nanScheduler.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nanScheduler.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nanScheduler.c
+@@ -3515,22 +3515,19 @@
+ 				kalMemSet(prNanAvailEntry->au4AvailMap, 0xFF,
+ 				    sizeof(prNanAvailEntry->au4AvailMap));
+ 			} else {
++				u8 *bitmap = (u8 *)prAttrAvailEntry +
++					offsetof(struct _NAN_AVAILABILITY_ENTRY_T, aucTimeBitmapAndBandChnlEntry);
++
+ 				u2TimeBitmapControl = *(uint16_t *)(
+-					prAttrAvailEntry
+-					->aucTimeBitmapAndBandChnlEntry);
+-				ucTimeBitmapLength =
+-					prAttrAvailEntry
+-					->aucTimeBitmapAndBandChnlEntry[2];
++					bitmap);
++				ucTimeBitmapLength = bitmap[2];
+ 				prAttrBandChnlList =
+ 					(struct _NAN_BAND_CHNL_LIST_T *)
+-					(prAttrAvailEntry
+-					->aucTimeBitmapAndBandChnlEntry +
++					(bitmap +
+ 					3 + ucTimeBitmapLength);
+ 				nanParserInterpretTimeBitmapField(
+ 					prAdapter, u2TimeBitmapControl,
+-					ucTimeBitmapLength,
+-					&prAttrAvailEntry
+-					->aucTimeBitmapAndBandChnlEntry[3],
++					ucTimeBitmapLength, bitmap + 3,
+ 					prNanAvailEntry->au4AvailMap);
+ 			}
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_data_engine.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_data_engine.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_data_engine.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_data_engine.c
+@@ -6464,15 +6464,18 @@
+ 		prAttrEC = (struct _NAN_ATTR_ELEMENT_CONTAINER_T *)
+ 				   prAdapter->rDataPathInfo.aucECAttr;
+ 
++		u8 *elements = (u8 *)prAttrEC +
++			offsetof(struct _NAN_ATTR_ELEMENT_CONTAINER_T, aucElements);
++
+ 		prAttrEC->ucAttrId = NAN_ATTR_ID_ELEMENT_CONTAINER;
+ 		prAttrEC->ucMapID = 0;
+ 
+ 		/* HT-CAP IE - leverage RLM */
+ 		rlmFillNANHTCapIE(prAdapter, prBssInfo,
+-				  &(prAttrEC->aucElements[0]));
++				  (elements + 0));
+ 
+ 		prAdapter->rDataPathInfo.prLocalHtCap =
+-			(struct IE_HT_CAP *)&(prAttrEC->aucElements[0]);
++			(struct IE_HT_CAP *)(elements + 0);
+ 
+ #if CFG_SUPPORT_802_11AC
+ 		if (prWifiVar->fgEnNanVHT == TRUE) {
+@@ -6480,12 +6483,11 @@
+ 			/* VHT-CAP IE -  leverage RLM */
+ 			rlmFillNANVHTCapIE(
+ 				prAdapter, prBssInfo,
+-				&(prAttrEC->aucElements[ELEM_HDR_LEN +
+-							ELEM_MAX_LEN_HT_CAP]));
++				(elements + ELEM_HDR_LEN +
++							ELEM_MAX_LEN_HT_CAP));
+ 			prAdapter->rDataPathInfo
+-				.prLocalVhtCap = (struct IE_VHT_CAP *)&(
+-				prAttrEC->aucElements[ELEM_HDR_LEN +
+-						      ELEM_MAX_LEN_HT_CAP]);
++				.prLocalVhtCap = (struct IE_VHT_CAP *)(elements + ELEM_HDR_LEN +
++						      ELEM_MAX_LEN_HT_CAP);
+ 		}
+ #endif
+ 
+@@ -6493,16 +6495,15 @@
+ 		DBGLOG(NAN, INFO, "Bring HE IE\n");
+ 		ucHeCapLen = heRlmFillNANHECapIE(
+ 			prAdapter, prBssInfo,
+-			&(prAttrEC->aucElements[ELEM_HDR_LEN +
++			(elements + ELEM_HDR_LEN +
+ 				ELEM_MAX_LEN_HT_CAP +
+ 				ELEM_HDR_LEN +
+-				ELEM_MAX_LEN_VHT_CAP]));
++				ELEM_MAX_LEN_VHT_CAP));
+ 			prAdapter->rDataPathInfo.prLocalHeCap =
+-				(struct _IE_HE_CAP_T *)&(prAttrEC->aucElements
+-				[ELEM_HDR_LEN +
++				(struct _IE_HE_CAP_T *)(elements + ELEM_HDR_LEN +
+ 				ELEM_MAX_LEN_HT_CAP +
+ 				ELEM_HDR_LEN +
+-				ELEM_MAX_LEN_VHT_CAP]);
++				ELEM_MAX_LEN_VHT_CAP);
+ 
+ 		u2AttrLength += ucHeCapLen;
+ 		DBGLOG(NAN, INFO, "Len HE Cap IE (%d)\n", ucHeCapLen);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_sec.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_sec.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_sec.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/nan/nan_sec.c
+@@ -637,8 +637,8 @@
+ 	dumpMemory8((uint8_t *)buf, len);
+ 
+ 	if (cipher == NAN_CIPHER_SUITE_ID_NCS_SK_GCM_256) {
+-		if (hmac_sha384(key, key_len, buf, len, hash)) {
+-			DBGLOG(NAN, INFO, "[%s] ERROR! hmac_sha384() failed",
++		if (mtk_wlan_hmac_sha384(key, key_len, buf, len, hash)) {
++			DBGLOG(NAN, INFO, "[%s] ERROR! mtk_wlan_hmac_sha384() failed",
+ 			       __func__);
+ 			return WLAN_STATUS_FAILURE;
+ 		}
+@@ -648,8 +648,8 @@
+ 		dumpMemory8(mic, NCS_SK_256_MIC_LEN);
+ 	} else {
+ 		/* NAN_CIPHER_SUITE_ID_NCS_SK_CCM_128 */
+-		if (hmac_sha256(key, key_len, buf, len, hash)) {
+-			DBGLOG(NAN, INFO, "[%s] ERROR! hmac_sha256() failed",
++		if (mtk_wlan_hmac_sha256(key, key_len, buf, len, hash)) {
++			DBGLOG(NAN, INFO, "[%s] ERROR! mtk_wlan_hmac_sha256() failed",
+ 			       __func__);
+ 			return WLAN_STATUS_FAILURE;
+ 		}
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_coredump.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_coredump.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_coredump.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_coredump.c
+@@ -200,8 +200,7 @@
+ 		goto unregister_chrdev_region;
+ 	}
+ 
+-	ctx->driver_class = class_create(THIS_MODULE,
+-		COREDUMP_WIFI_INF_NAME);
++	ctx->driver_class = class_create(COREDUMP_WIFI_INF_NAME);
+ 	if (IS_ERR(ctx->driver_class)) {
+ 		DBGLOG(INIT, ERROR,
+ 			"class_create failed, ret: %d\n",
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_dev.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_dev.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_dev.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_dev.c
+@@ -239,8 +239,7 @@
+ 	if (result < 0)
+ 		goto free_dev;
+ 
+-	gIndexDev->driver_class = class_create(THIS_MODULE,
+-		FW_INDEX_LOG_DRIVER_NAME);
++	gIndexDev->driver_class = class_create(FW_INDEX_LOG_DRIVER_NAME);
+ 
+ 	if (KAL_IS_ERR(gIndexDev->driver_class)) {
+ 		result = -ENOMEM;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_log.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_log.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_log.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_fw_log.c
+@@ -263,8 +263,7 @@
+ 		goto unregister_chrdev_region;
+ 	}
+ 
+-	prInf->driver_class = class_create(THIS_MODULE,
+-					   FW_LOG_WIFI_INF_NAME);
++	prInf->driver_class = class_create(FW_LOG_WIFI_INF_NAME);
+ 	if (IS_ERR(prInf->driver_class)) {
+ 		DBGLOG(INIT, ERROR,
+ 			"class_create failed, ret: %d\n",
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_ics.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_ics.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_ics.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_ics.c
+@@ -359,8 +359,7 @@
+ 	if (result < 0)
+ 		goto free_dev;
+ 
+-	gIcsDev->driver_class = class_create(THIS_MODULE,
+-		FW_LOG_ICS_DRIVER_NAME);
++	gIcsDev->driver_class = class_create(FW_LOG_ICS_DRIVER_NAME);
+ 
+ 	if (KAL_IS_ERR(gIcsDev->driver_class)) {
+ 		result = -ENOMEM;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_init.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_init.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_init.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_init.c
+@@ -1192,35 +1192,242 @@
+ 	WLAN_CIPHER_SUITE_NO_GROUP_ADDR
+ };
+ 
++/* The MT6878 station implementation supports a single link and radio. */
++static int mtk_cfg_v9_add_key(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, int link_id, u8 idx, bool pairwise,
++			   const u8 *addr, struct key_params *params)
++{
++	if (link_id > 0 || !wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_add_key(wiphy, wdev->netdev, link_id, idx, pairwise, addr, params);
++}
++
++static int mtk_cfg_v9_get_key(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, int link_id, u8 idx, bool pairwise,
++			   const u8 *addr, void *cookie,
++			   void (*callback)(void *, struct key_params *))
++{
++	if (link_id > 0 || !wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_get_key(wiphy, wdev->netdev, link_id, idx, pairwise, addr, cookie, callback);
++}
++
++static int mtk_cfg_v9_del_key(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, int link_id, u8 idx, bool pairwise,
++			   const u8 *addr)
++{
++	if (link_id > 0 || !wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_del_key(wiphy, wdev->netdev, link_id, idx, pairwise, addr);
++}
++
++static int mtk_cfg_v9_set_default_mgmt_key(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, int link_id, u8 idx)
++{
++	if (link_id > 0 || !wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_set_default_mgmt_key(wiphy, wdev->netdev, link_id, idx);
++}
++
++static int mtk_cfg_v9_set_default_key(struct wiphy *wiphy,
++			   struct net_device *dev, int link_id, u8 idx,
++			   bool unicast, bool multicast)
++{
++	if (link_id > 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_set_default_key(wiphy, dev, link_id, idx, unicast, multicast);
++}
++
++static int mtk_cfg_v9_get_station(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, const u8 *addr,
++			   struct station_info *info)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_get_station(wiphy, wdev->netdev, addr, info);
++}
++
++#if CFG_SUPPORT_TDLS
++static int mtk_cfg_v9_change_station(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, const u8 *addr,
++			   struct station_parameters *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_change_station(wiphy, wdev->netdev, addr, params);
++}
++#endif
++
++#if CFG_SUPPORT_TDLS
++static int mtk_cfg_v9_add_station(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, const u8 *addr,
++			   struct station_parameters *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_add_station(wiphy, wdev->netdev, addr, params);
++}
++#endif
++
++#if CFG_SUPPORT_TDLS
++static int mtk_cfg_v9_tdls_mgmt(struct wiphy *wiphy,
++			   struct net_device *dev, const u8 *peer, int link_id,
++			   u8 action, u8 token, u16 status, u32 caps,
++			   bool initiator, const u8 *buf, size_t len)
++{
++	if (link_id > 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_tdls_mgmt(wiphy, dev, peer, action, token, status, caps, initiator, buf, len);
++}
++#endif
++
++static int mtk_cfg_v9_del_station(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, struct station_del_parameters *params)
++{
++	if (!wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_del_station(wiphy, wdev->netdev, params);
++}
++
++static int mtk_cfg_v9_remain_on_channel(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, struct ieee80211_channel *chan,
++			   unsigned int duration, u64 *cookie, const u8 *rx_addr)
++{
++	if (rx_addr)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_remain_on_channel(wiphy, wdev, chan, duration, cookie);
++}
++
++#if CFG_SUPPORT_DFS_MASTER == 1
++static int mtk_cfg_v9_start_radar_detection(struct wiphy *wiphy,
++			   struct net_device *dev, struct cfg80211_chan_def *chandef,
++			   u32 cac_time_ms, int link_id)
++{
++	if (link_id > 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_start_radar_detection(wiphy, dev, chandef, cac_time_ms);
++}
++#endif
++
++#if CFG_ENABLE_WIFI_DIRECT_CFG_80211 != 0
++static int mtk_cfg_v9_change_beacon(struct wiphy *wiphy,
++			   struct net_device *dev, struct cfg80211_ap_update *info)
++{
++	return mtk_cfg_change_beacon(wiphy, dev, &info->beacon);
++}
++#endif
++
++#if CFG_ENABLE_WIFI_DIRECT_CFG_80211 != 0
++static int mtk_cfg_v9_stop_ap(struct wiphy *wiphy,
++			   struct net_device *dev, unsigned int link_id)
++{
++	if (link_id != 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_stop_ap(wiphy, dev);
++}
++#endif
++
++#if CFG_ENABLE_WIFI_DIRECT_CFG_80211 != 0
++static int mtk_cfg_v9_set_wiphy_params(struct wiphy *wiphy,
++			   int radio_idx, u32 changed)
++{
++	if (radio_idx > 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_set_wiphy_params(wiphy, changed);
++}
++#endif
++
++#if CFG_ENABLE_WIFI_DIRECT_CFG_80211 != 0
++static int mtk_cfg_v9_set_bitrate_mask(struct wiphy *wiphy,
++			   struct net_device *dev, unsigned int link_id, const u8 *peer,
++			   const struct cfg80211_bitrate_mask *mask)
++{
++	if (link_id != 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_set_bitrate_mask(wiphy, dev, peer, mask);
++}
++#endif
++
++#if CFG_ENABLE_WIFI_DIRECT_CFG_80211 != 0
++static int mtk_cfg_v9_set_tx_power(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, int radio_idx,
++			   enum nl80211_tx_power_setting type, int mbm)
++{
++	if (radio_idx > 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_set_txpower(wiphy, wdev, type, mbm);
++}
++#endif
++
++#if CFG_ENABLE_WIFI_DIRECT_CFG_80211 != 0
++static int mtk_cfg_v9_get_tx_power(struct wiphy *wiphy,
++			   struct wireless_dev *wdev, int radio_idx,
++			   unsigned int link_id, int *dbm)
++{
++	if (radio_idx > 0 || link_id != 0)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_get_txpower(wiphy, wdev, dbm);
++}
++#endif
++
++#if (CFG_SUPPORT_BCN_PROT == 1)
++static int mtk_cfg_v9_set_default_beacon_key(struct wiphy *wiphy,
++					    struct wireless_dev *wdev,
++					    int link_id, u8 idx)
++{
++	if (link_id > 0 || !wdev->netdev)
++		return -EOPNOTSUPP;
++
++	return mtk_cfg_set_default_beacon_key(wiphy, wdev->netdev, link_id, idx);
++}
++#endif
++
+ static struct cfg80211_ops mtk_cfg_ops = {
+ 	.add_virtual_intf = mtk_cfg_add_iface,
+ 	.del_virtual_intf = mtk_cfg_del_iface,
+ 	.change_virtual_intf = mtk_cfg_change_iface,
+-	.add_key = mtk_cfg_add_key,
+-	.get_key = mtk_cfg_get_key,
+-	.del_key = mtk_cfg_del_key,
+-	.set_default_mgmt_key = mtk_cfg_set_default_mgmt_key,
++	.add_key = mtk_cfg_v9_add_key,
++	.get_key = mtk_cfg_v9_get_key,
++	.del_key = mtk_cfg_v9_del_key,
++	.set_default_mgmt_key = mtk_cfg_v9_set_default_mgmt_key,
+ #if (CFG_SUPPORT_BCN_PROT == 1) && \
+ 	(KERNEL_VERSION(5, 7, 0) <= CFG80211_VERSION_CODE)
+-	.set_default_beacon_key = mtk_cfg_set_default_beacon_key,
+-#endif
+-	.set_default_key = mtk_cfg_set_default_key,
+-	.get_station = mtk_cfg_get_station,
++	.set_default_beacon_key = mtk_cfg_v9_set_default_beacon_key,
++#endif
++	.set_default_key = mtk_cfg_v9_set_default_key,
++	.get_station = mtk_cfg_v9_get_station,
+ #if (CFG_ADVANCED_80211_MLO == 1) || \
+ 	(KERNEL_VERSION(6, 1, 0) <= CFG80211_VERSION_CODE)
+ 	.get_channel = mtk_cfg_get_channel,
+ #endif
+ #if CFG_SUPPORT_TDLS
+-	.change_station = mtk_cfg_change_station,
+-	.add_station = mtk_cfg_add_station,
++	.change_station = mtk_cfg_v9_change_station,
++	.add_station = mtk_cfg_v9_add_station,
+ 	.tdls_oper = mtk_cfg_tdls_oper,
+-	.tdls_mgmt = mtk_cfg_tdls_mgmt,
++	.tdls_mgmt = mtk_cfg_v9_tdls_mgmt,
+ #if CFG_SUPPORT_TDLS_OFFCHANNEL
+ 	.tdls_channel_switch = mtk_tdls_channel_switch,
+ 	.tdls_cancel_channel_switch = mtk_tdls_cancel_channel_switch,
+ #endif
+ #endif
+-	.del_station = mtk_cfg_del_station,	/* AP/P2P use this function */
++	.del_station = mtk_cfg_v9_del_station,	/* AP/P2P use this function */
+ 	.scan = mtk_cfg_scan,
+ #if KERNEL_VERSION(4, 5, 0) <= CFG80211_VERSION_CODE
+ 	.abort_scan = mtk_cfg_abort_scan,
+@@ -1250,7 +1457,7 @@
+ 	.assoc = mtk_cfg_assoc,
+ 
+ 	/* Action Frame TX/RX */
+-	.remain_on_channel = mtk_cfg_remain_on_channel,
++	.remain_on_channel = mtk_cfg_v9_remain_on_channel,
+ 	.cancel_remain_on_channel = mtk_cfg_cancel_remain_on_channel,
+ 	.mgmt_tx = mtk_cfg_mgmt_tx,
+ 	/* .mgmt_tx_cancel_wait        = mtk_cfg80211_mgmt_tx_cancel_wait, */
+@@ -1266,7 +1473,7 @@
+ #endif
+ 
+ #if (CFG_SUPPORT_DFS_MASTER == 1)
+-	.start_radar_detection = mtk_cfg_start_radar_detection,
++	.start_radar_detection = mtk_cfg_v9_start_radar_detection,
+ #if KERNEL_VERSION(3, 13, 0) <= CFG80211_VERSION_CODE
+ 	.channel_switch = mtk_cfg_channel_switch,
+ #endif
+@@ -1278,12 +1485,12 @@
+ 	.deauth = mtk_cfg_deauth,
+ 	.disassoc = mtk_cfg_disassoc,
+ 	.start_ap = mtk_cfg_start_ap,
+-	.change_beacon = mtk_cfg_change_beacon,
+-	.stop_ap = mtk_cfg_stop_ap,
+-	.set_wiphy_params = mtk_cfg_set_wiphy_params,
+-	.set_bitrate_mask = mtk_cfg_set_bitrate_mask,
+-	.set_tx_power = mtk_cfg_set_txpower,
+-	.get_tx_power = mtk_cfg_get_txpower,
++	.change_beacon = mtk_cfg_v9_change_beacon,
++	.stop_ap = mtk_cfg_v9_stop_ap,
++	.set_wiphy_params = mtk_cfg_v9_set_wiphy_params,
++	.set_bitrate_mask = mtk_cfg_v9_set_bitrate_mask,
++	.set_tx_power = mtk_cfg_v9_set_tx_power,
++	.get_tx_power = mtk_cfg_v9_get_tx_power,
+ #endif
+ 	.update_ft_ies = mtk_cfg80211_update_ft_ies,
+ #ifdef CFG_SUPPORT_SNIFFER_RADIOTAP
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_kal.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_kal.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_kal.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_kal.c
+@@ -21,6 +21,9 @@
+  *                    E X T E R N A L   R E F E R E N C E S
+  *******************************************************************************
+  */
++#include <net/gro.h>
++#include <net/netdev_rx_queue.h>
++#include <net/rps.h>
+ #include "gl_os.h"
+ #include "gl_kal.h"
+ #include "gl_wext.h"
+@@ -1877,14 +1880,7 @@
+ 
+ static inline void napi_gro_flush_list(struct napi_struct *napi)
+ {
+-	napi_gro_flush(napi, false);
+-#if KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+-	if (napi->rx_count) {
+-		netif_receive_skb_list(&napi->rx_list);
+-		INIT_LIST_HEAD(&napi->rx_list);
+-		napi->rx_count = 0;
+-	}
+-#endif
++	gro_flush_normal(&napi->gro, false);
+ }
+ 
+ static inline void kal_gro_flush_queue(struct GLUE_INFO *prGlueInfo)
+@@ -1923,7 +1919,7 @@
+ 		DBGLOG_LIMITED(INIT, TRACE, "napi_gro_flush.\n");
+ #if KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+ 		prGlueInfo->u4PendingFlushNum =
+-			prGlueInfo->napi.rx_count;
++			prGlueInfo->napi.gro.rx_count;
+ #else
+ 		prGlueInfo->u4PendingFlushNum = 0;
+ #endif
+@@ -6697,7 +6693,7 @@
+ 		mod_timer(&prGlueInfo->tickfn,
+ 			  jiffies + u4Interval * HZ / MSEC_PER_SEC);
+ 	} else {
+-		del_timer_sync(&(prGlueInfo->tickfn));
++		timer_delete_sync(&(prGlueInfo->tickfn));
+ 
+ 		prGlueInfo->tickfn.expires = jiffies + u4Interval * HZ /
+ 					     MSEC_PER_SEC;
+@@ -6723,7 +6719,7 @@
+ 
+ 	clear_bit(GLUE_FLAG_TIMEOUT_BIT, &prGlueInfo->ulFlag);
+ 
+-	if (del_timer_sync(&(prGlueInfo->tickfn)) >= 0)
++	if (timer_delete_sync(&(prGlueInfo->tickfn)) >= 0)
+ 		return TRUE;
+ 	else
+ 		return FALSE;
+@@ -6849,7 +6845,7 @@
+ {
+ #if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+ 	struct GLUE_INFO *prGlueInfo =
+-		from_timer(prGlueInfo, timer, tickfn);
++		timer_container_of(prGlueInfo, timer, tickfn);
+ #else
+ 	struct GLUE_INFO *prGlueInfo = (struct GLUE_INFO *)arg;
+ #endif
+@@ -8483,7 +8479,7 @@
+ 	DBGLOG(INIT, INFO, "Send UEvent = %s", src);
+ 
+ 	/*send uevent*/
+-	strlcpy(event_string, src, sizeof(event_string));
++	strscpy(event_string, src, sizeof(event_string));
+ 	if (event_string[0] == '\0') { /*string is null*/
+ 		return FALSE;
+ 	}
+@@ -11495,7 +11491,7 @@
+ 	return 0;
+ }
+ 
+-#if CFG_MTK_ANDROID_WMT && \
++#if CFG_MTK_ANDROID_WMT && IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS) && \
+ 	KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+ enum ENUM_WLAN_FB_EVENT kalGetMtkDispEvent(const uint8_t *fn,
+ 	unsigned long event, void *data)
+@@ -11524,6 +11520,7 @@
+ enum ENUM_WLAN_FB_EVENT kalGetFbEvent(const uint8_t *fn,
+ 	unsigned long event, void *data)
+ {
++#ifdef FB_EVENT_BLANK
+ 	int32_t blank = 0;
+ 	struct fb_event *evdata = data;
+ 	enum ENUM_WLAN_FB_EVENT eEvent = WLAN_FB_EVENT_IGNORE;
+@@ -11543,6 +11540,9 @@
+ 		fn, event, blank, eEvent);
+ end:
+ 	return eEvent;
++#else
++	return WLAN_FB_EVENT_IGNORE;
++#endif
+ }
+ #endif /* CFG_MTK_ANDROID_WMT */
+ 
+@@ -11556,7 +11556,7 @@
+ 	if (!prGlueInfo)
+ 		goto end;
+ 
+-#if CFG_MTK_ANDROID_WMT && \
++#if CFG_MTK_ANDROID_WMT && IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS) && \
+ 	KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+ 	eEvent = kalGetMtkDispEvent(__func__, event, data);
+ #else /* CFG_MTK_ANDROID_WMT */
+@@ -11600,7 +11600,7 @@
+ 
+ 	wlan_fb_notifier_priv_data = prGlueInfo;
+ 
+-#if CFG_MTK_ANDROID_WMT && \
++#if CFG_MTK_ANDROID_WMT && IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS) && \
+ 	KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+ 	i4Ret = mtk_disp_notifier_register("wlan_fb_notifier",
+ 			&wlan_fb_notifier);
+@@ -11617,7 +11617,7 @@
+ 
+ void kalFbNotifierUnReg(void)
+ {
+-#if CFG_MTK_ANDROID_WMT && \
++#if CFG_MTK_ANDROID_WMT && IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS) && \
+ 	KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+ 	mtk_disp_notifier_unregister(&wlan_fb_notifier);
+ #else
+@@ -11721,13 +11721,13 @@
+ #if (CFG_ADVANCED_80211_MLO == 1)
+ #if (CFG_SUPPORT_802_11BE_MLO == 1)
+ 	cfg80211_ch_switch_notify(prDevHandler, &chandef,
+-		prBssInfo->ucLinkIndex, 0);
++		prBssInfo->ucLinkIndex);
+ #else
+ 	cfg80211_ch_switch_notify(prDevHandler, &chandef,
+-		linkIdx, 0);
++		linkIdx);
+ #endif
+ #else
+-	cfg80211_ch_switch_notify(prDevHandler, &chandef);
++	cfg80211_ch_switch_notify(prDevHandler, &chandef, 0);
+ #endif
+ 	/* Check SAP channel */
+ 	p2pFuncSwitchSapChannel(prGlueInfo->prAdapter);
+@@ -13354,9 +13354,6 @@
+ 	set_user_nice(current, prGlueInfo->prAdapter->rWifiVar.cThreadNice);
+ }
+ 
+-#if KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+-MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
+-#endif
+ 
+ #if CFG_SUPPORT_RX_GRO
+ /* For Linux kernel version wrapper */
+@@ -13405,7 +13402,7 @@
+ void kalNapiThreadedInit(struct GLUE_INFO *prGlueInfo)
+ {
+ #if KERNEL_VERSION(5, 15, 0) <= CFG80211_VERSION_CODE
+-	if (dev_set_threaded(&prGlueInfo->dummy_dev, TRUE) != 0) {
++	if (dev_set_threaded(prGlueInfo->prDevHandler, TRUE) != 0) {
+ 		prGlueInfo->napi_thread = NULL;
+ 		DBGLOG(INIT, ERROR, "Napi Threaded Init Fail\n");
+ 	} else {
+@@ -13428,13 +13425,12 @@
+ {
+ 	spin_lock_init(&prGlueInfo->napi_spinlock);
+ 	skb_queue_head_init(&prGlueInfo->rRxNapiSkbQ);
+-	/* use dummy device to register napi */
+-	init_dummy_netdev(&prGlueInfo->dummy_dev);
++	/* Register NAPI on the primary interface allocated by wlanNetCreate(). */
+ #if (KERNEL_VERSION(6, 1, 0) <= LINUX_VERSION_CODE)
+-	netif_napi_add(&prGlueInfo->dummy_dev, &prGlueInfo->napi,
++	netif_napi_add(prGlueInfo->prDevHandler, &prGlueInfo->napi,
+ 			kalNapiPoll);
+ #else
+-	netif_napi_add(&prGlueInfo->dummy_dev, &prGlueInfo->napi,
++	netif_napi_add(prGlueInfo->prDevHandler, &prGlueInfo->napi,
+ 			kalNapiPoll, NAPI_POLL_WEIGHT);
+ #endif
+ #if CFG_SUPPORT_RX_NAPI_THREADED
+@@ -14111,7 +14107,7 @@
+ #endif
+ {
+ #if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+-	struct GLUE_INFO *prGlueInfo = from_timer(prGlueInfo, timer, rTpeTimer);
++	struct GLUE_INFO *prGlueInfo = timer_container_of(prGlueInfo, timer, rTpeTimer);
+ #else
+ 	struct GLUE_INFO *prGlueInfo = (struct GLUE_INFO *)ulData;
+ #endif
+@@ -14181,7 +14177,7 @@
+ 	if (!prAdapter->rWifiVar.ucTpEnhanceEnable)
+ 		return;
+ 
+-	del_timer_sync(&(prGlueInfo->rTpeTimer));
++	timer_delete_sync(&(prGlueInfo->rTpeTimer));
+ }
+ 
+ int kalTpeProcess(struct GLUE_INFO *prGlueInfo,
+@@ -14274,7 +14270,7 @@
+ 			prGlueInfo->u4TpeTimeout) {
+ 			/* Timeout already, flush out directly. */
+ 			if (timer_pending(&prGlueInfo->rTpeTimer))
+-				del_timer(&prGlueInfo->rTpeTimer);
++				timer_delete(&prGlueInfo->rTpeTimer);
+ 			kalTpeFlush(prGlueInfo);
+ 			kalSetEvent(prGlueInfo);
+ 		} else {
+@@ -14371,7 +14367,7 @@
+ {
+ #if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+ 	struct GLUE_INFO *prGlueInfo =
+-		from_timer(prGlueInfo, timer, rTxDirectSkbTimer);
++		timer_container_of(prGlueInfo, timer, rTxDirectSkbTimer);
+ #else
+ 	struct GLUE_INFO *prGlueInfo = (struct GLUE_INFO *)data;
+ #endif
+@@ -14390,7 +14386,7 @@
+ 
+ #if KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE
+ 	struct GLUE_INFO *prGlueInfo =
+-		from_timer(prGlueInfo, timer, rTxDirectHifTimer);
++		timer_container_of(prGlueInfo, timer, rTxDirectHifTimer);
+ #else
+ 	struct GLUE_INFO *prGlueInfo = (struct GLUE_INFO *)data;
+ #endif
+@@ -15939,8 +15935,8 @@
+ 
+ 	if (HAL_IS_TX_DIRECT(prAdapter)) {
+ 		if (prAdapter->fgTxDirectInited) {
+-			del_timer_sync(&prGlueInfo->rTxDirectSkbTimer);
+-			del_timer_sync(&prGlueInfo->rTxDirectHifTimer);
++			timer_delete_sync(&prGlueInfo->rTxDirectSkbTimer);
++			timer_delete_sync(&prGlueInfo->rTxDirectHifTimer);
+ 			kalTxDirectClearSkbQ(prGlueInfo);
+ 		}
+ 	}
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_cfg80211.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_cfg80211.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_cfg80211.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_cfg80211.c
+@@ -1689,25 +1689,11 @@
+ 
+ 		i4Written += kalSnprintf(aucLogBuf + i4Written,
+ 					 LOG_BUFFER_SIZE - i4Written,
+-					 "name[%s] inact[%d] beacon[%d] dtim[%d] ht[%d] vht[%d]",
++					 "name[%s] inact[%d] beacon[%d] dtim[%d]",
+ 					 dev->name,
+ 					 settings->inactivity_timeout,
+ 					 settings->beacon_interval,
+-					 settings->dtim_period,
+-					 settings->ht_required,
+-					 settings->vht_required);
+-#if KERNEL_VERSION(5, 8, 0) <= CFG80211_VERSION_CODE
+-		i4Written += kalSnprintf(aucLogBuf + i4Written,
+-					 LOG_BUFFER_SIZE - i4Written,
+-					 " he[%d]",
+-					 settings->he_required);
+-#endif
+-#if KERNEL_VERSION(5, 11, 0) <= CFG80211_VERSION_CODE
+-		i4Written += kalSnprintf(aucLogBuf + i4Written,
+-					 LOG_BUFFER_SIZE - i4Written,
+-					 " sae_h2e[%d]",
+-					 settings->sae_h2e_required);
+-#endif
++					 settings->dtim_period);
+ 
+ 		if (chandef) {
+ 			kalChannelFormatSwitch(chandef, chandef->chan,
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_kal.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_kal.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_kal.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_p2p_kal.c
+@@ -196,7 +196,7 @@
+ 	if (!prNetdevice)
+ 		return;
+ 	/* Send event to user space */
+-	wireless_send_event(prNetdevice, IWEVASSOCREQIE, &wrqu, pucExtraInfo);
++	kalWextSendEvent(prNetdevice, IWEVASSOCREQIE, &wrqu, pucExtraInfo);
+ }
+ 
+ /*---------------------------------------------------------------------------*/
+@@ -233,7 +233,7 @@
+ 		evt.data.length = strlen(aucBuffer);
+ 
+ 		/* indicate in IWECUSTOM event */
+-		wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++		kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 			IWEVCUSTOM, &evt, aucBuffer);
+ 
+ 	} else if (eState == MEDIA_STATE_DISCONNECTED) {
+@@ -242,7 +242,7 @@
+ 		evt.data.length = strlen(aucBuffer);
+ 
+ 		/* indicate in IWECUSTOM event */
+-		wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++		kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 			IWEVCUSTOM, &evt, aucBuffer);
+ 	} else {
+ 		ASSERT(0);
+@@ -354,7 +354,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate in IWECUSTOM event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ 
+ }				/* end of kalP2PSetRole() */
+@@ -734,7 +734,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate in IWEVCUSTOM event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ 
+ }				/* end of kalP2PIndicateConnReq() */
+@@ -788,7 +788,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate in IWEVCUSTOM event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ 
+ #else
+@@ -898,7 +898,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate in IWEVCUSTOM event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ 
+ }				/* kalP2PInvitationStatus */
+@@ -936,7 +936,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate IWEVP2PSDREQ event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ }				/* end of kalP2PIndicateSDRequest() */
+ 
+@@ -971,7 +971,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate IWEVP2PSDREQ event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ }				/* end of kalP2PIndicateSDResponse() */
+ 
+@@ -1008,7 +1008,7 @@
+ 	evt.data.length = strlen(aucBuffer);
+ 
+ 	/* indicate IWEVP2PSDREQ event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ }				/* end of kalP2PIndicateSDResponse() */
+ 
+@@ -1049,7 +1049,7 @@
+ 		prGlueInfo->prP2PInfo[0]->aucSecCheckRsp, u2RspLen);
+ #endif
+ 	/* indicate in IWECUSTOM event */
+-	wireless_send_event(prGlueInfo->prP2PInfo[0]->prDevHandler,
++	kalWextSendEvent(prGlueInfo->prP2PInfo[0]->prDevHandler,
+ 		IWEVCUSTOM, &evt, aucBuffer);
+ }				/* p2pFsmRunEventRxDisassociation */
+ #endif
+@@ -1381,7 +1381,6 @@
+ 			prMsduInfo->ucBssIndex, *pu8GlCookie);
+ 
+ 		cfg80211_mgmt_tx_status(
+-			/* struct net_device * dev, */
+ 			prNetdevice->ieee80211_ptr,
+ 			*pu8GlCookie,
+ 			(uint8_t *) ((unsigned long) prMsduInfo->prPacket +
+@@ -1482,7 +1481,6 @@
+ 
+ #if (KERNEL_VERSION(3, 18, 0) <= CFG80211_VERSION_CODE)
+ 		cfg80211_rx_mgmt(
+-			/* struct net_device * dev, */
+ 			prNetdevice->ieee80211_ptr,
+ 			i4Freq,
+ 			RCPI_TO_dBm(
+@@ -1494,7 +1492,6 @@
+ 			NL80211_RXMGMT_FLAG_ANSWERED);
+ #elif (KERNEL_VERSION(3, 12, 0) <= CFG80211_VERSION_CODE)
+ 		cfg80211_rx_mgmt(
+-			/* struct net_device * dev, */
+ 			prNetdevice->ieee80211_ptr,
+ 			i4Freq,
+ 			RCPI_TO_dBm(
+@@ -1507,7 +1504,6 @@
+ 			GFP_ATOMIC);
+ #else
+ 		cfg80211_rx_mgmt(
+-			/* struct net_device * dev, */
+ 			prNetdevice->ieee80211_ptr,
+ 			i4Freq,
+ 			RCPI_TO_dBm(
+@@ -1646,7 +1642,6 @@
+ #endif
+ 				cfg80211_connect_result(
+ 					prGlueP2pInfo->aprRoleHandler,
+-					/* struct net_device * dev, */
+ 					aucBssid,
+ 					prP2pConnInfo->aucIEBuf,
+ 					prP2pConnInfo->u4BufLength,
+@@ -1664,7 +1659,6 @@
+ 				);
+ 			/* Disconnect, what if u2StatusReason == 0? */
+ 			cfg80211_disconnected(prGlueP2pInfo->aprRoleHandler,
+-				/* struct net_device * dev, */
+ 				u2StatusReason,
+ 				pucRxIEBuf, u2RxIELen,
+ #if CFG_WPS_DISCONNECT || (KERNEL_VERSION(4, 4, 0) <= CFG80211_VERSION_CODE)
+@@ -1722,8 +1716,7 @@
+ 			rStationInfo.assoc_req_ies_len =
+ 				prCliStaRec->u2AssocReqIeLen;
+ 
+-			cfg80211_new_sta(prP2pGlueInfo->aprRoleHandler,
+-				/* struct net_device * dev, */
++			cfg80211_new_sta(prP2pGlueInfo->aprRoleHandler->ieee80211_ptr,
+ 				aucBssid,
+ 				&rStationInfo, GFP_KERNEL);
+ 		} else {
+@@ -1752,8 +1745,7 @@
+ 						RSN_AKM_SUITE_OWE)
+ 					break;
+ 				prCliStaRec->fgIsConnected = FALSE;
+-				cfg80211_del_sta(prP2pGlueInfo->aprRoleHandler,
+-					/* struct net_device * dev, */
++				cfg80211_del_sta(prP2pGlueInfo->aprRoleHandler->ieee80211_ptr,
+ 					aucBssid, GFP_KERNEL);
+ 			}
+ #if CFG_STAINFO_FEATURE
+@@ -2318,7 +2310,6 @@
+ 
+ #if (KERNEL_VERSION(3, 18, 0) <= CFG80211_VERSION_CODE)
+ 	cfg80211_rx_mgmt(
+-		/* struct net_device * dev, */
+ 		prNetdevice->ieee80211_ptr,
+ 		prFrame->u4Freq,
+ 		0,
+@@ -2327,7 +2318,6 @@
+ 		NL80211_RXMGMT_FLAG_ANSWERED);
+ #elif (KERNEL_VERSION(3, 12, 0) <= CFG80211_VERSION_CODE)
+ 	cfg80211_rx_mgmt(
+-		/* struct net_device * dev, */
+ 		prNetdevice->ieee80211_ptr,
+ 		prFrame->u4Freq,
+ 		0,
+@@ -2337,7 +2327,6 @@
+ 		GFP_ATOMIC);
+ #else
+ 	cfg80211_rx_mgmt(
+-		/* struct net_device * dev, */
+ 		prNetdevice->ieee80211_ptr,
+ 		prFrame->u4Freq,
+ 		0,
+@@ -2714,11 +2703,11 @@
+ 
+ #if (KERNEL_VERSION(6, 3, 0) <= CFG80211_VERSION_CODE)
+ 	cfg80211_ch_switch_started_notify(prNetdevice, &chandef,
+-				  ucLinkIdx, ucCsaCount, fgQuiet, 0);
++				  ucLinkIdx, ucCsaCount, fgQuiet);
+ #elif (KERNEL_VERSION(6, 1, 0) <= CFG80211_VERSION_CODE) && \
+ 	(CFG_ADVANCED_80211_MLO == 1)
+ 	cfg80211_ch_switch_started_notify(prNetdevice, &chandef,
+-				  ucLinkIdx, ucCsaCount, fgQuiet, 0);
++				  ucLinkIdx, ucCsaCount, fgQuiet);
+ #elif (KERNEL_VERSION(6, 1, 0) <= CFG80211_VERSION_CODE) || \
+ 	(CFG_ADVANCED_80211_MLO == 1)
+ 	cfg80211_ch_switch_started_notify(prNetdevice, &chandef,
+@@ -2880,13 +2869,13 @@
+ #if (CFG_ADVANCED_80211_MLO == 1)
+ #if (CFG_SUPPORT_802_11BE_MLO == 1)
+ 	cfg80211_ch_switch_notify(prNetdevice, &chandef,
+-		prBssInfo->ucLinkIndex, 0);
++		prBssInfo->ucLinkIndex);
+ #else
+ 	cfg80211_ch_switch_notify(prNetdevice, &chandef,
+-		linkIdx, 0);
++		linkIdx);
+ #endif
+ #else
+-	cfg80211_ch_switch_notify(prNetdevice, &chandef);
++	cfg80211_ch_switch_notify(prNetdevice, &chandef, 0);
+ #endif
+ 	netif_carrier_on(prNetdevice);
+ 	netif_tx_wake_all_queues(prNetdevice);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sa_log.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sa_log.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sa_log.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sa_log.c
+@@ -382,8 +382,7 @@
+ 	if (result < 0)
+ 		goto free_dev;
+ 
+-	gSaDev->driver_class = class_create(THIS_MODULE,
+-		SA_DRIVER_NAME);
++	gSaDev->driver_class = class_create(SA_DRIVER_NAME);
+ 
+ 	if (KAL_IS_ERR(gSaDev->driver_class)) {
+ 		result = -ENOMEM;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sys_lock.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sys_lock.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sys_lock.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_sys_lock.c
+@@ -71,7 +71,7 @@
+ 	uint64_t end_time_nsec;
+ 	uint64_t timeout;
+ 
+-	del_timer_sync(&wfsys_lock_timer);
++	timer_delete_sync(&wfsys_lock_timer);
+ 
+ 	end_time_sec = local_clock();
+ 	end_time_nsec = do_div(end_time_sec, NSEC_PER_SEC) / MSEC_PER_SEC;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext.c
+@@ -1100,22 +1100,22 @@
+ 
+ 		switch (eNetWorkType) {
+ 		case PARAM_NETWORK_TYPE_DS:
+-			strncpy(pcName, "IEEE 802.11b", pcNameSize);
++			kalStrnCpy(pcName, "IEEE 802.11b", pcNameSize);
+ 			break;
+ 		case PARAM_NETWORK_TYPE_OFDM24:
+-			strncpy(pcName, "IEEE 802.11bgn", pcNameSize);
++			kalStrnCpy(pcName, "IEEE 802.11bgn", pcNameSize);
+ 			break;
+ 		case PARAM_NETWORK_TYPE_AUTOMODE:
+ 		case PARAM_NETWORK_TYPE_OFDM5:
+-			strncpy(pcName, "IEEE 802.11abgn", pcNameSize);
++			kalStrnCpy(pcName, "IEEE 802.11abgn", pcNameSize);
+ 			break;
+ 		case PARAM_NETWORK_TYPE_FH:
+ 		default:
+-			strncpy(pcName, "IEEE 802.11", pcNameSize);
++			kalStrnCpy(pcName, "IEEE 802.11", pcNameSize);
+ 			break;
+ 		}
+ 	} else {
+-		strncpy(pcName, "Disconnected", pcNameSize);
++		kalStrnCpy(pcName, "Disconnected", pcNameSize);
+ 	}
+ 
+ 	pcName[pcNameSize - 1] = '\0';
+@@ -2031,8 +2031,10 @@
+ 		pcCur += iwEvent.len;
+ #endif /* WIRELESS_EXT >= 15 */
+ 
+-		if (wextSrchDesiredWPAIE(&prBss->aucIEs[sizeof(
+-		    struct PARAM_FIXED_IEs)],
++		if (prBss->u4IELength >= sizeof(struct PARAM_FIXED_IEs) &&
++		    wextSrchDesiredWPAIE((u8 *)prBss +
++			offsetof(struct PARAM_BSSID_EX, aucIEs) +
++			sizeof(struct PARAM_FIXED_IEs),
+ 		    prBss->u4IELength - sizeof(struct PARAM_FIXED_IEs), 0xDD,
+ 		    (uint8_t **) &prDesiredIE)) {
+ 			iwEvent.cmd = IWEVGENIE;
+@@ -2055,8 +2057,10 @@
+ 			pcCur += iwEvent.len;
+ 		}
+ #if CFG_SUPPORT_WPS		/* search WPS IE (0xDD, 221, OUI: 0x0050f204) */
+-		if (wextSrchDesiredWPSIE(&prBss->aucIEs[sizeof(
+-		    struct PARAM_FIXED_IEs)],
++		if (prBss->u4IELength >= sizeof(struct PARAM_FIXED_IEs) &&
++		    wextSrchDesiredWPSIE((u8 *)prBss +
++			offsetof(struct PARAM_BSSID_EX, aucIEs) +
++			sizeof(struct PARAM_FIXED_IEs),
+ 		    prBss->u4IELength - sizeof(struct PARAM_FIXED_IEs), 0xDD,
+ 		    (uint8_t **) &prDesiredIE)) {
+ 			iwEvent.cmd = IWEVGENIE;
+@@ -2082,8 +2086,10 @@
+ 
+ 		/* Search RSN IE (0x30, 48). pBss->IEs starts from timestamp. */
+ 		/* pBss->IEs starts from timestamp */
+-		if (wextSrchDesiredWPAIE(&prBss->aucIEs[sizeof(
+-		    struct PARAM_FIXED_IEs)],
++		if (prBss->u4IELength >= sizeof(struct PARAM_FIXED_IEs) &&
++		    wextSrchDesiredWPAIE((u8 *)prBss +
++			offsetof(struct PARAM_BSSID_EX, aucIEs) +
++			sizeof(struct PARAM_FIXED_IEs),
+ 		    prBss->u4IELength - sizeof(struct PARAM_FIXED_IEs), 0x30,
+ 		    (uint8_t **) &prDesiredIE)) {
+ 
+@@ -2107,8 +2113,10 @@
+ 			pcCur += iwEvent.len;
+ 		}
+ #if CFG_SUPPORT_WAPI		/* Android+ */
+-		if (wextSrchDesiredWAPIIE(&prBss->aucIEs[
+-		    sizeof(struct PARAM_FIXED_IEs)],
++		if (prBss->u4IELength >= sizeof(struct PARAM_FIXED_IEs) &&
++		    wextSrchDesiredWAPIIE((u8 *)prBss +
++			offsetof(struct PARAM_BSSID_EX, aucIEs) +
++			sizeof(struct PARAM_FIXED_IEs),
+ 		    prBss->u4IELength - sizeof(struct PARAM_FIXED_IEs),
+ 		    (uint8_t **) &prDesiredIE)) {
+ 
+@@ -4141,7 +4149,7 @@
+  * \return (none)
+  *
+  * \note Event is indicated to upper layer if cmd is supported and data is
+- *	 valid. Using of kernel symbol wireless_send_event(), which is defined
++ *	 valid. Using of kernel symbol kalWextSendEvent(), which is defined
+  *	 in <net/iw_handler.h> after WE-14 (2.4.20).
+  */
+ /*----------------------------------------------------------------------------*/
+@@ -4324,7 +4332,7 @@
+ 	}
+ 
+ 	/* Send event to user space */
+-	wireless_send_event(prDevHandler, u4Cmd, &wrqu,
++	kalWextSendEvent(prDevHandler, u4Cmd, &wrqu,
+ 			    pucExtraInfo);
+ skip_indicate_event:
+ 	return;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/gl_wext_priv.c
+@@ -129,6 +129,13 @@
+ /* Order is important here because the OIDs should be in order of
+  *  increasing value for binary searching.
+  */
++/* The ACPI handler uses glue state while the OID dispatcher takes an adapter. */
++static uint32_t oid_req_set_acpi_power(struct ADAPTER *adapter, void *buf,
++				      u32 len, u32 *used)
++{
++	return reqExtSetAcpiDevicePowerState(adapter->prGlueInfo, buf, len, used);
++}
++
+ static struct WLAN_REQ_ENTRY arWlanOidReqTable[] = {
+ 	/* General Operational Characteristics */
+ 
+@@ -137,7 +144,7 @@
+ 		OID_802_3_CURRENT_ADDRESS,
+ 		DISP_STRING("OID_802_3_CURRENT_ADDRESS"),
+ 		TRUE, TRUE, ENUM_OID_DRIVER_CORE, 6,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryCurrentAddr,
++		wlanoidQueryCurrentAddr,
+ 		NULL
+ 	},
+ 
+@@ -151,7 +158,7 @@
+ 		DISP_STRING("OID_802_11_SUPPORTED_RATES"),
+ 		TRUE, FALSE, ENUM_OID_DRIVER_CORE,
+ 		(sizeof(uint8_t) * PARAM_MAX_LEN_RATES_EX),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQuerySupportedRates,
++		wlanoidQuerySupportedRates,
+ 		NULL
+ 	}
+ 	,
+@@ -169,7 +176,7 @@
+ 		TRUE, FALSE, ENUM_OID_GLUE_EXTENSION,
+ 		sizeof(enum PARAM_DEVICE_POWER_STATE),
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) reqExtSetAcpiDevicePowerState
++		oid_req_set_acpi_power
+ 	}
+ 	,
+ 
+@@ -178,7 +185,7 @@
+ 		OID_CUSTOM_OID_INTERFACE_VERSION,
+ 		DISP_STRING("OID_CUSTOM_OID_INTERFACE_VERSION"),
+ 		TRUE, FALSE, ENUM_OID_DRIVER_CORE, 4,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryOidInterfaceVersion,
++		wlanoidQueryOidInterfaceVersion,
+ 		NULL
+ 	}
+ 	,
+@@ -187,16 +194,16 @@
+ 		DISP_STRING("OID_CUSTOM_MCR_RW"),
+ 		TRUE, TRUE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_CUSTOM_MCR_RW_STRUCT),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryMcrRead,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetMcrWrite}
++		wlanoidQueryMcrRead,
++		wlanoidSetMcrWrite}
+ 	,
+ 	{
+ 		OID_CUSTOM_EEPROM_RW,
+ 		DISP_STRING("OID_CUSTOM_EEPROM_RW"),
+ 		TRUE, TRUE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_CUSTOM_EEPROM_RW_STRUCT),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryEepromRead,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetEepromWrite
++		wlanoidQueryEepromRead,
++		wlanoidSetEepromWrite
+ 	}
+ 	,
+ 	{
+@@ -204,8 +211,8 @@
+ 		DISP_STRING("OID_CUSTOM_SW_CTRL"),
+ 		TRUE, TRUE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_CUSTOM_SW_CTRL_STRUCT),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQuerySwCtrlRead,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetSwCtrlWrite
++		wlanoidQuerySwCtrlRead,
++		wlanoidSetSwCtrlWrite
+ 	}
+ 	,
+ #if CFG_SUPPORT_QA_TOOL
+@@ -214,7 +221,7 @@
+ 		DISP_STRING("OID_CUSTOM_TEST_MODE"),
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, 0,
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidRftestSetTestMode
++		wlanoidRftestSetTestMode
+ 	}
+ 	,
+ 	{
+@@ -222,7 +229,7 @@
+ 		DISP_STRING("OID_CUSTOM_ABORT_TEST_MODE"),
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, 0,
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidRftestSetAbortTestMode
++		wlanoidRftestSetAbortTestMode
+ 	}
+ 	,
+ 	{
+@@ -235,8 +242,8 @@
+ 		 * sizeof(PARAM_MTK_WIFI_TEST_STRUCT_T),
+ 		 */
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, 0,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidRftestQueryAutoTest,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidRftestSetAutoTest
++		wlanoidRftestQueryAutoTest,
++		wlanoidRftestSetAutoTest
+ 	}
+ 	,
+ 	{
+@@ -244,7 +251,7 @@
+ 		DISP_STRING("OID_CUSTOM_TEST_ICAP_MODE"),
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, 0,
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidRftestSetTestIcapMode
++		wlanoidRftestSetTestIcapMode
+ 	}
+ 	,
+ #endif
+@@ -256,8 +263,8 @@
+ 		OID_CUSTOM_BWCS_CMD,
+ 		DISP_STRING("OID_CUSTOM_BWCS_CMD"),
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, sizeof(struct PTA_IPC),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryBT,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetBT
++		wlanoidQueryBT,
++		wlanoidSetBT
+ 	}
+ 	,
+ #endif
+@@ -266,15 +273,15 @@
+ 		DISP_STRING("OID_CUSTOM_MTK_NVRAM_RW"),
+ 		TRUE, TRUE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_CUSTOM_EEPROM_RW_STRUCT),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryNvramRead,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetNvramWrite}
++		wlanoidQueryNvramRead,
++		wlanoidSetNvramWrite}
+ 	,
+ 	{
+ 		OID_CUSTOM_CFG_SRC_TYPE,
+ 		DISP_STRING("OID_CUSTOM_CFG_SRC_TYPE"),
+ 		TRUE, FALSE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(enum ENUM_CFG_SRC_TYPE),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryCfgSrcType,
++		wlanoidQueryCfgSrcType,
+ 		NULL
+ 	}
+ 	,
+@@ -283,7 +290,7 @@
+ 		DISP_STRING("OID_CUSTOM_EEPROM_TYPE"),
+ 		TRUE, FALSE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(enum ENUM_EEPROM_TYPE),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryEepromType,
++		wlanoidQueryEepromType,
+ 		NULL
+ 	}
+ 	,
+@@ -293,7 +300,7 @@
+ 		DISP_STRING("OID_802_11_WAPI_MODE"),
+ 		FALSE, TRUE, ENUM_OID_DRIVER_CORE, 4,
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetWapiMode
++		wlanoidSetWapiMode
+ 	}
+ 	,
+ 	{
+@@ -301,7 +308,7 @@
+ 		DISP_STRING("OID_802_11_WAPI_ASSOC_INFO"),
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, 0,
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetWapiAssocInfo
++		wlanoidSetWapiAssocInfo
+ 	}
+ 	,
+ 	{
+@@ -310,7 +317,7 @@
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_WPI_KEY),
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetWapiKey
++		wlanoidSetWapiKey
+ 	}
+ 	,
+ #endif
+@@ -321,7 +328,7 @@
+ 		DISP_STRING("OID_CUSTOM_LOWLATENCY_MODE"),
+ 		FALSE, FALSE, ENUM_OID_DRIVER_CORE, sizeof(uint32_t) * 7,
+ 		NULL,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetLowLatencyMode
++		wlanoidSetLowLatencyMode
+ 	}
+ 	,
+ #endif /* CFG_SUPPORT_LOWLATENCY_MODE */
+@@ -330,7 +337,7 @@
+ 		DISP_STRING("OID_IPC_WIFI_LOG_UI"),
+ 		TRUE, FALSE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_WIFI_LOG_LEVEL_UI),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryWifiLogLevelSupport,
++		wlanoidQueryWifiLogLevelSupport,
+ 		NULL
+ 	}
+ 	,
+@@ -339,8 +346,8 @@
+ 		DISP_STRING("OID_IPC_WIFI_LOG_LEVEL"),
+ 		TRUE, FALSE, ENUM_OID_DRIVER_CORE,
+ 		sizeof(struct PARAM_WIFI_LOG_LEVEL),
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryWifiLogLevel,
+-		(PFN_OID_HANDLER_FUNC_REQ) wlanoidSetWifiLogLevel
++		wlanoidQueryWifiLogLevel,
++		wlanoidSetWifiLogLevel
+ 	}
+ 	,
+ #if CFG_SUPPORT_ANT_SWAP
+@@ -348,7 +355,7 @@
+ 	OID_CUSTOM_QUERY_ANT_SWAP_CAPABILITY,	/* 0xFFA0CD00 */
+ 	DISP_STRING("OID_CUSTOM_QUERY_ANT_SWAP_CAPABILITY"),
+ 	TRUE, FALSE, ENUM_OID_DRIVER_CORE, sizeof(uint32_t),
+-	(PFN_OID_HANDLER_FUNC_REQ) wlanoidQueryAntennaSwap,
++	wlanoidQueryAntennaSwap,
+ 	NULL
+ 	}
+ 	,
+@@ -2252,13 +2259,13 @@
+ 
+ 	if (prWlanReqEntry->eOidMethod == ENUM_OID_GLUE_ONLY) {
+ 		/* GLUE sw info only */
+-		status = prWlanReqEntry->pfOidSetHandler(prGlueInfo,
++		status = prWlanReqEntry->pfOidSetHandler(prGlueInfo->prAdapter,
+ 				prNdisReq->ndisOidContent,
+ 				prNdisReq->inNdisOidlength, &u4SetInfoLen);
+ 	} else if (prWlanReqEntry->eOidMethod ==
+ 		   ENUM_OID_GLUE_EXTENSION) {
+ 		/* multiple sw operations */
+-		status = prWlanReqEntry->pfOidSetHandler(prGlueInfo,
++		status = prWlanReqEntry->pfOidSetHandler(prGlueInfo->prAdapter,
+ 				prNdisReq->ndisOidContent,
+ 				prNdisReq->inNdisOidlength, &u4SetInfoLen);
+ 	} else if (prWlanReqEntry->eOidMethod ==
+@@ -2266,7 +2273,7 @@
+ 		/* driver core */
+ 
+ 		status = kalIoctl(prGlueInfo,
+-			(PFN_OID_HANDLER_FUNC) prWlanReqEntry->pfOidSetHandler,
++			prWlanReqEntry->pfOidSetHandler,
+ 			prNdisReq->ndisOidContent,
+ 			prNdisReq->inNdisOidlength, &u4SetInfoLen);
+ 	} else {
+@@ -2394,13 +2401,13 @@
+ 
+ 	if (prWlanReqEntry->eOidMethod == ENUM_OID_GLUE_ONLY) {
+ 		/* GLUE sw info only */
+-		status = prWlanReqEntry->pfOidQueryHandler(prGlueInfo,
++		status = prWlanReqEntry->pfOidQueryHandler(prGlueInfo->prAdapter,
+ 				prNdisReq->ndisOidContent,
+ 				prNdisReq->inNdisOidlength, &u4BufLen);
+ 	} else if (prWlanReqEntry->eOidMethod ==
+ 		   ENUM_OID_GLUE_EXTENSION) {
+ 		/* multiple sw operations */
+-		status = prWlanReqEntry->pfOidQueryHandler(prGlueInfo,
++		status = prWlanReqEntry->pfOidQueryHandler(prGlueInfo->prAdapter,
+ 				prNdisReq->ndisOidContent,
+ 				prNdisReq->inNdisOidlength, &u4BufLen);
+ 	} else if (prWlanReqEntry->eOidMethod ==
+@@ -2408,7 +2415,7 @@
+ 		/* driver core */
+ 
+ 		status = kalIoctl(prGlueInfo,
+-		    (PFN_OID_HANDLER_FUNC)prWlanReqEntry->pfOidQueryHandler,
++		    prWlanReqEntry->pfOidQueryHandler,
+ 		    prNdisReq->ndisOidContent, prNdisReq->inNdisOidlength,
+ 		    &u4BufLen);
+ 	} else {
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/axi/axi.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/axi/axi.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/axi/axi.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/axi/axi.c
+@@ -455,7 +455,7 @@
+ 	return ret;
+ }
+ 
+-static int mtk_axi_remove(struct platform_device *pdev)
++static void mtk_axi_remove(struct platform_device *pdev)
+ {
+ 	struct mt66xx_hif_driver_data *prDriverData =
+ 		platform_get_drvdata(pdev);
+@@ -465,7 +465,6 @@
+ 	halFreeHifMem(pdev);
+ 	emi_mem_uninit(prChipInfo, pdev);
+ 	platform_set_drvdata(pdev, NULL);
+-	return 0;
+ }
+ 
+ static int mtk_axi_suspend(struct platform_device *pdev,
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/common/hal_pdma.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/common/hal_pdma.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/common/hal_pdma.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/hif/common/hal_pdma.c
+@@ -1715,7 +1715,7 @@
+ 	prBusInfo = prChipInfo->bus_info;
+ 	prSwWfdmaInfo = &prBusInfo->rSwWfdmaInfo;
+ 
+-	del_timer_sync(&prHifInfo->rSerTimer);
++	timer_delete_sync(&prHifInfo->rSerTimer);
+ #if (CFG_SUPPORT_TX_DATA_DELAY == 1)
+ 	hrtimer_cancel(&prHifInfo->rTxDelayTimer);
+ #endif
+@@ -4390,7 +4390,7 @@
+ #endif
+ {
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 15, 0))
+-	struct GL_HIF_INFO *prHif = from_timer(prHif, timer, rSerTimer);
++	struct GL_HIF_INFO *prHif = timer_container_of(prHif, timer, rSerTimer);
+ 	struct GLUE_INFO *prGlueInfo = (struct GLUE_INFO *)prHif->rSerTimerData;
+ #else
+ 	struct GLUE_INFO *prGlueInfo = (struct GLUE_INFO *)arg;
+@@ -4638,7 +4638,7 @@
+ 
+ 	case ERR_RECOV_WAIT_MCU_NORMAL:
+ 		if (u4Status & ERROR_DETECT_MCU_NORMAL_STATE) {
+-			del_timer_sync(&prHifInfo->rSerTimer);
++			timer_delete_sync(&prHifInfo->rSerTimer);
+ #if (CFG_SUPPORT_ADHOC) || (CFG_ENABLE_WIFI_DIRECT)
+ 			/* update Beacon frame if operating in AP mode. */
+ 			DBGLOG(HAL, INFO, "SER(T) Host re-initialize BCN\n");
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_cfg80211.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_cfg80211.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_cfg80211.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_cfg80211.h
+@@ -467,7 +467,8 @@
+ 			 enum nl80211_iftype type, u32 *flags,
+ 			 struct vif_params *params);
+ #endif
+-#if (CFG_ADVANCED_80211_MLO == 1)
++#if (CFG_ADVANCED_80211_MLO == 1) || \
++	(KERNEL_VERSION(6, 1, 0) <= CFG80211_VERSION_CODE)
+ int mtk_cfg_add_key(struct wiphy *wiphy,
+ 		    struct net_device *ndev, int link_id, u8 key_index,
+ 		    bool pairwise, const u8 *mac_addr,
+@@ -503,7 +504,8 @@
+ 		struct net_device *ndev, u8 key_index);
+ #endif
+ 
+-#if (CFG_ADVANCED_80211_MLO == 1)
++#if (CFG_ADVANCED_80211_MLO == 1) || \
++	(KERNEL_VERSION(6, 1, 0) <= CFG80211_VERSION_CODE)
+ int mtk_cfg_set_default_beacon_key(struct wiphy *wiphy,
+ 		struct net_device *ndev, int link_id, u8 key_index);
+ #else
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_kal.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_kal.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_kal.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_kal.h
+@@ -1080,7 +1080,14 @@
+ 
+ /* string operation */
+ #define kalStrCpy(dest, src)               strcpy(dest, src)
+-#define kalStrnCpy(dest, src, n)           strncpy(dest, src, n)
++static inline char *kalStrnCpy(char *dest, const char *src, size_t count)
++{
++	size_t copied = strnlen(src, count);
++
++	memcpy(dest, src, copied);
++	memset(dest + copied, 0, count - copied);
++	return dest;
++}
+ #define kalStrCmp(ct, cs)                  strcmp(ct, cs)
+ #define kalStrnCmp(ct, cs, n)              strncmp(ct, cs, n)
+ #define kalStrChr(s, c)                    strchr(s, c)
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_os.h
+@@ -876,7 +876,6 @@
+ #endif /* CFG_SUPPORT_TASKLET_FREE_MSDU */
+ 
+ #if CFG_SUPPORT_RX_GRO
+-	struct net_device dummy_dev;
+ 	struct napi_struct napi;
+ 	OS_SYSTIME tmGROFlushTimeout;
+ 	spinlock_t napi_spinlock;
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_typedef.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_typedef.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_typedef.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_typedef.h
+@@ -157,8 +157,7 @@
+  */
+ #ifndef ENTRY_OF
+ #define ENTRY_OF(_addrOfField, _type, _field) \
+-	((_type *)((int8_t *)(_addrOfField) - \
+-	(int8_t *)OFFSET_OF(_type, _field)))
++	((_type *)((unsigned long)(_addrOfField) - OFFSET_OF(_type, _field)))
+ #endif /* ENTRY_OF */
+ 
+ /* This macro align the input value to the DW boundary.
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext.h
+@@ -339,4 +339,13 @@
+ 
+ #endif /* WIRELESS_EXT */
+ 
++/* Legacy event delivery is available only with the kernel WEXT core. */
++static inline void kalWextSendEvent(struct net_device *dev, unsigned int cmd,
++				    union iwreq_data *wrqu, const char *extra)
++{
++#if IS_ENABLED(CONFIG_WEXT_CORE)
++	wireless_send_event(dev, cmd, wrqu, extra);
++#endif
++}
++
+ #endif /* _GL_WEXT_H */
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/include/gl_wext_priv.h
+@@ -303,7 +303,7 @@
+ #endif /*CFG_AP_80211KVR_INTERFACE*/
+ 
+ typedef uint32_t(*PFN_OID_HANDLER_FUNC_REQ) (
+-	void *prAdapter,
++	struct ADAPTER *prAdapter,
+ 	void *pvBuf, uint32_t u4BufLen,
+ 	uint32_t *pu4OutInfoLen);
+ 
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/plat/mt6878/plat_priv.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/plat/mt6878/plat_priv.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/plat/mt6878/plat_priv.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/os/linux/plat/mt6878/plat_priv.c
+@@ -94,6 +94,7 @@
+ #if KERNEL_VERSION(5, 4, 0) <= CFG80211_VERSION_CODE
+ void kalSetTaskUtilMinPct(int pid, unsigned int min)
+ {
++#if IS_ENABLED(CONFIG_ANDROID_VENDOR_HOOKS)
+ 	int ret = 0;
+ 	unsigned int blc_1024;
+ 	struct task_struct *p;
+@@ -131,6 +132,7 @@
+ 		ret = sched_setattr(p, &attr);
+ 		put_task_struct(p);
+ 	}
++#endif
+ }
+ 
+ static LIST_HEAD(wlan_policy_list);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha256.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha256.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha256.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha256.c
+@@ -123,7 +123,7 @@
+ }
+ 
+ /**
+- * hmac_sha256 - HMAC-SHA256 over data buffer (RFC 2104)
++ * mtk_wlan_hmac_sha256 - HMAC-SHA256 over data buffer (RFC 2104)
+  * @key: Key for HMAC operations
+  * @key_len: Length of the key in bytes
+  * @data: Pointers to the data area
+@@ -132,7 +132,7 @@
+  * Returns: 0 on success, -1 on failure
+  */
+ int
+-hmac_sha256(const u8 *key, size_t key_len, const u8 *data, size_t data_len,
++mtk_wlan_hmac_sha256(const u8 *key, size_t key_len, const u8 *data, size_t data_len,
+ 	    u8 *mac) {
+ 	return hmac_sha256_vector(key, key_len, 1, &data, &data_len, mac);
+ }
+@@ -172,7 +172,7 @@
+ 	os_memcpy(pmkIdSrc+post, RMAC, 6);
+ 	post += 6;
+ 	os_memcpy(pmkIdSrc+post, aucServiceID, 6);
+-	hmac_sha256(key, 32, pmkIdSrc, pmkIdSrcLen, pmkid);
++	mtk_wlan_hmac_sha256(key, 32, pmkIdSrc, pmkIdSrcLen, pmkid);
+ 	os_free(pmkIdSrc);
+ 
+ }
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384-internal.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384-internal.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384-internal.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384-internal.c
+@@ -30,7 +30,7 @@
+ 	struct sha384_state ctx;
+ 	size_t i;
+ 
+-	sha384_init(&ctx);
++	mtk_wlan_sha384_init(&ctx);
+ 	for (i = 0; i < num_elem; i++)
+ 		if (sha384_process(&ctx, addr[i], len[i]))
+ 			return -1;
+@@ -52,7 +52,7 @@
+  *   @return CRYPT_OK if successful
+  */
+ void
+-sha384_init(struct sha384_state *md) {
++mtk_wlan_sha384_init(struct sha384_state *md) {
+ 	md->curlen = 0;
+ 	md->length = 0;
+ 	md->state[0] = CONST64(0xcbbb9d5dc1059ed8);
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha384.c
+@@ -81,7 +81,7 @@
+ }
+ 
+ /**
+- * hmac_sha384 - HMAC-SHA384 over data buffer (RFC 2104)
++ * mtk_wlan_hmac_sha384 - HMAC-SHA384 over data buffer (RFC 2104)
+  * @key: Key for HMAC operations
+  * @key_len: Length of the key in bytes
+  * @data: Pointers to the data area
+@@ -90,7 +90,7 @@
+  * Returns: 0 on success, -1 on failure
+  */
+ int
+-hmac_sha384(const u8 *key, size_t key_len, const u8 *data, size_t data_len,
++mtk_wlan_hmac_sha384(const u8 *key, size_t key_len, const u8 *data, size_t data_len,
+ 	    u8 *mac) {
+ 	return hmac_sha384_vector(key, key_len, 1, &data, &data_len, mac);
+ }
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha512-internal.c b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha512-internal.c
+--- a/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha512-internal.c
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/gen4m/wpa_supp/src/crypto/sha512-internal.c
+@@ -30,7 +30,7 @@
+ 	struct nan_rdf_sha512_state ctx;
+ 	size_t i;
+ 
+-	sha512_init(&ctx);
++	mtk_wlan_sha512_init(&ctx);
+ 	for (i = 0; i < num_elem; i++)
+ 		if (sha512_process(&ctx, addr[i], len[i]))
+ 			return -1;
+@@ -156,7 +156,7 @@
+  *   @return CRYPT_OK if successful
+  */
+ void
+-sha512_init(struct nan_rdf_sha512_state *md) {
++mtk_wlan_sha512_init(struct nan_rdf_sha512_state *md) {
+ 	md->curlen = 0;
+ 	md->length = 0;
+ 	md->state[0] = CONST64(0x6a09e667f3bcc908);
+diff --git a/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/common/wmt_build_in_adapter.c b/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/common/wmt_build_in_adapter.c
+--- a/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/common/wmt_build_in_adapter.c
++++ b/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/common/wmt_build_in_adapter.c
+@@ -198,7 +198,7 @@
+ 			pr_notice("%s failed to allocate log buffer\n", __func__);
+ 			goto exit;
+ 		}
+-		strncpy(rec->log, buf, len);
++		memcpy(rec->log, buf, len);
+ 		rec->log[len] = '\0';
+ 		rec->num = 0;
+ 		rec->first_sec = sec;
+@@ -309,7 +309,7 @@
+ 		goto err1;
+ 	}
+ 
+-	pConnDbgClass = class_create(THIS_MODULE, CONN_DBG_DEVICE_NAME);
++	pConnDbgClass = class_create(CONN_DBG_DEVICE_NAME);
+ 	if (IS_ERR(pConnDbgClass)) {
+ 		pr_info("class create fail, error code(%ld)\n", PTR_ERR(pConnDbgClass));
+ 		goto err2;
+diff --git a/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/power_throttling/adapter.c b/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/power_throttling/adapter.c
+--- a/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/power_throttling/adapter.c
++++ b/kernel_device_modules-6.1/drivers/misc/mediatek/connectivity/power_throttling/adapter.c
+@@ -518,7 +518,7 @@
+ 		goto err1;
+ 	}
+ 
+-	pConnPwrClass = class_create(THIS_MODULE, CONN_PWR_DEVICE_NAME);
++	pConnPwrClass = class_create(CONN_PWR_DEVICE_NAME);
+ 	if (IS_ERR(pConnPwrClass)) {
+ 		pr_info("class create fail, error code(%ld)\n",
+ 						PTR_ERR(pConnPwrClass));
+diff --git a/vendor/mediatek/kernel_modules/connectivity/wlan/core/connfem b/vendor/mediatek/kernel_modules/connectivity/wlan/core/connfem
+new file mode 120000
+--- /dev/null
++++ b/vendor/mediatek/kernel_modules/connectivity/wlan/core/connfem
+@@ -0,0 +1 @@
++../../connfem
+\ No newline at end of file

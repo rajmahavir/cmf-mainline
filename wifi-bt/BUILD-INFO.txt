@@ -1,0 +1,5 @@
+Kernel release: 7.2.0-cmf-wifi-pmic+
+Architecture: AArch64
+Built against the signed v13 diagnostic’s Module.symvers.
+Vendor modules omit optional BTF metadata. The v13 diagnostic uses the v11 kernel.
+The modules passed depmod and have no on-device load test.
