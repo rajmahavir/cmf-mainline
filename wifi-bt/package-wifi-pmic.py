@@ -32,11 +32,13 @@ def append_profile(boot, profile_path):
     profile = profile_path.read_bytes()
     if not profile.startswith(b"\x1f\x8b") or len(profile) > PROFILE_LIMIT:
         raise ValueError("Expected a gzip profile no larger than 12 MiB")
-    if boot.stat().st_size > PROFILE_OFFSET:
-        raise ValueError("Boot image overlaps the private profile offset")
     digest = hashlib.sha256(profile).hexdigest().encode("ascii")
     header = b"\n".join((PROFILE_MARKER, str(len(profile)).encode("ascii"), digest, b""))
     with boot.open("r+b") as image:
+        image.seek(PROFILE_OFFSET)
+        existing = image.read(PROFILE_HEADER_SIZE + len(profile))
+        if any(existing):
+            raise ValueError("Target profile region in boot image contains non-zero data")
         image.seek(PROFILE_OFFSET)
         image.write(header.ljust(PROFILE_HEADER_SIZE, b"\0"))
         image.write(profile)
@@ -81,8 +83,6 @@ def main():
     tools = args.packaging / "tools"
     run(sys.executable, tools / "mkbootimg/mkbootimg.py", "--header_version", "4",
         "--kernel", output / "payload.bin.gz", "--output", boot)
-    if args.private_profile:
-        header, profile = append_profile(boot, args.private_profile)
     avb = tools / "avb/avbtool.py"
     key = args.avb_key or args.packaging / "keys/candidate-avb.pem"
     signing = ["--signing_helper", args.signing_helper] if args.signing_helper else []
@@ -93,6 +93,8 @@ def main():
         "--flags", "0", "--prop", "com.android.build.boot.os_version:14",
         "--prop", f"com.android.build.boot.fingerprint:{FINGERPRINT}",
         "--prop", "com.android.build.boot.security_patch:2026-04-05", *signing)
+    if args.private_profile:
+        header, profile = append_profile(boot, args.private_profile)
     with (output / "avb-verification.txt").open("w") as log:
         run(sys.executable, avb, "verify_image", "--image", boot, "--key", key, stdout=log)
     signed = boot.read_bytes()

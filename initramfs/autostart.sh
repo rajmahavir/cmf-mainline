@@ -1,6 +1,7 @@
-#!/bin/sh
+#!/bin/busybox sh
 set -eu
 umask 077
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 
 work=/tmp/cmf-v13
 header=/tmp/cmf-profile.header
@@ -8,14 +9,19 @@ archive=/tmp/cmf-profile.tar.gz
 trap 'status=$?; rm -f "$work/wpa.conf" "$header" "$archive"; if [ "$status" -ne 0 ]; then echo "<3>CMF autostart failed with status $status"; fi' EXIT
 
 partition=
-for attempt in $(seq 1 25); do
+for attempt in $(seq 1 30); do
     for event in /sys/class/block/*/uevent; do
-        if grep -qx 'PARTNAME=boot_a' "$event"; then
-            partition=/dev/$(sed -n 's/^DEVNAME=//p' "$event")
-            break
+        if grep -qx 'PARTNAME=boot_a' "$event" 2>/dev/null; then
+            devname=$(sed -n 's/^DEVNAME=//p' "$event")
+            partition="/dev/$devname"
+            if [ ! -b "$partition" ]; then
+                major=$(sed -n 's/^MAJOR=//p' "$event")
+                minor=$(sed -n 's/^MINOR=//p' "$event")
+                mknod "$partition" b "$major" "$minor" 2>/dev/null || true
+            fi
+            break 2
         fi
     done
-    [ -b "$partition" ] && break
     sleep 1
 done
 if [ ! -b "$partition" ]; then

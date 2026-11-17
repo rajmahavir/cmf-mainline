@@ -871,6 +871,7 @@
 
 		mblock-15-framebuffer {
 			reg = <0x00 0xfe0d0000 0x00 0x1f2f000>;
+			no-map;
 			compatible = "mediatek,framebuffer";
 		};
 
@@ -1002,20 +1003,13 @@
 		#size-cells = <0x02>;
 		ranges;
 
-		simplefb@fe0d0000 {
+		framebuffer@fe0d0000 {
 			compatible = "simple-framebuffer";
-			reg = <0x00 0xfe0d0000 0x00 0xa08c00>;
-			width = <0x438>;
-			height = <0x960>;
-			stride = <0x1100>;
+			reg = <0 0xfe0d0000 0 0x1f2f000>;
+			width = <1080>;
+			height = <2400>;
+			stride = <4352>;
 			format = "a8r8g8b8";
-			panel = <0x26>;
-
-			fb-panel {
-				width-mm = <0x4b>;
-				height-mm = <0xa0>;
-				phandle = <0x26>;
-			};
 		};
 	};
 

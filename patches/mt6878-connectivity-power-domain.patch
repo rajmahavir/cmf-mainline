@@ -1,0 +1,83 @@
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 6089c8cf5..c448d2fd7 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -20,6 +20,7 @@
+ 
+ #include "mt6735-pm-domains.h"
+ #include "mt6795-pm-domains.h"
++#include "mt6878-pm-domains.h"
+ #include "mt6893-pm-domains.h"
+ #include "mt8167-pm-domains.h"
+ #include "mt8173-pm-domains.h"
+@@ -1178,6 +1179,10 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.compatible = "mediatek,mt6795-power-controller",
+ 		.data = &mt6795_scpsys_data,
+ 	},
++	{
++		.compatible = "mediatek,mt6878-power-controller",
++		.data = &mt6878_scpsys_data,
++	},
+ 	{
+ 		.compatible = "mediatek,mt6893-power-controller",
+ 		.data = &mt6893_scpsys_data,
+diff --git a/drivers/pmdomain/mediatek/mt6878-pm-domains.h b/drivers/pmdomain/mediatek/mt6878-pm-domains.h
+new file mode 100644
+index 000000000..c2c45bb12
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6878-pm-domains.h
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* MT6878 connectivity domain data from MediaTek's mtk-scpsys-mt6878.c. */
++#ifndef __PMDOMAIN_MEDIATEK_MT6878_PM_DOMAINS_H
++#define __PMDOMAIN_MEDIATEK_MT6878_PM_DOMAINS_H
++
++#include <dt-bindings/power/mediatek,mt6878-power.h>
++#include "mtk-pm-domains.h"
++
++#define MT6878_CONN_PWR_CON 0x0e04
++
++static const struct scpsys_domain_data mt6878_domains[] = {
++	[MT6878_POWER_DOMAIN_CONN] = {
++		.name = "conn",
++		.ctl_offs = MT6878_CONN_PWR_CON,
++		.pwr_sta_offs = MT6878_CONN_PWR_CON,
++		.pwr_sta2nd_offs = MT6878_CONN_PWR_CON,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA, BIT(1), 0x0c94, 0x0c98, 0x0c9c),
++			BUS_PROT_WR_IGN(INFRA, BIT(12), 0x0c54, 0x0c58, 0x0c5c),
++			BUS_PROT_WR_IGN(INFRA, BIT(0), 0x0c94, 0x0c98, 0x0c9c),
++			BUS_PROT_WR_IGN(INFRA, BIT(8), 0x0c44, 0x0c48, 0x0c4c),
++		},
++	},
++};
++
++static enum scpsys_bus_prot_block mt6878_bus_prot_blocks[] = {
++	BUS_PROT_BLOCK_INFRA,
++};
++
++static const struct scpsys_soc_data mt6878_scpsys_data = {
++	.domains_data = mt6878_domains,
++	.num_domains = ARRAY_SIZE(mt6878_domains),
++	.bus_prot_blocks = mt6878_bus_prot_blocks,
++	.num_bus_prot_blocks = ARRAY_SIZE(mt6878_bus_prot_blocks),
++	.type = SCPSYS_MTCMOS_TYPE_DIRECT_CTL,
++};
++
++#endif
+diff --git a/include/dt-bindings/power/mediatek,mt6878-power.h b/include/dt-bindings/power/mediatek,mt6878-power.h
+new file mode 100644
+index 000000000..be8946dd7
+--- /dev/null
++++ b/include/dt-bindings/power/mediatek,mt6878-power.h
+@@ -0,0 +1,7 @@
++/* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
++#ifndef _DT_BINDINGS_POWER_MEDIATEK_MT6878_H
++#define _DT_BINDINGS_POWER_MEDIATEK_MT6878_H
++
++#define MT6878_POWER_DOMAIN_CONN 1
++
++#endif

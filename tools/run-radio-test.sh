@@ -17,13 +17,14 @@ wait_for_suppliers() {
     for attempt in $(seq 1 25); do
         read -r uptime idle < /proc/uptime
         if [ "${uptime%.*}" -ge 15 ] &&
+           [ -L /sys/bus/platform/devices/1c001000.syscon:power-controller/driver ] &&
            [ -L /sys/bus/spmi/devices/0-04/driver ] &&
            [ -L /sys/bus/spmi/devices/0-05/driver ]; then
             return 0
         fi
         sleep 1
     done
-    echo 'Timed out waiting for the RF PMIC providers' >&2
+    echo 'Timed out waiting for the MT6878 power controller and RF PMIC providers' >&2
     return 1
 }
 

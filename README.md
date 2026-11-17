@@ -22,12 +22,14 @@ Upstream **Linux 7.2** mainline port for the **Nothing CMF Phone 1** (MediaTek D
 
 ## Current Status
 
-* **Core Kernel:** Linux 7.2.0 (`postmarketOS/v7.2` branch).
-* **Bootchain:** Verified on physical hardware after flashing the diagnostic image to `boot_a`. The bootloader rejects `fastboot boot`.
-* **Serial Debug Console:** Interactive shell operational over USB CDC-ACM gadget (`/dev/ttyGS0`).
-* **Wi-Fi & Bluetooth Stack (v13):** MediaTek out-of-tree connectivity stack (`conninfra`, `connfem`, `connadp`, `wmt_chrdev`, `wlan_drv_gen4m_6878`, `bt_drv_6878`) backported to Linux 7.2, compiled against `7.2.0-cmf-wifi-pmic+` symbols, cryptographically signed, and verified with `depmod`.
-* **Device Tree:** Device tree sources include MT6878 PMIC regulator trees, fixed EINT interrupt indexing, reboot modes, and Bluetooth/Wi-Fi calibration nodes (`/bt@18800000`).
-* **Radio hardware (v15):** Bluetooth and Wi-Fi pre-calibration pass. The WLAN driver creates `phy0` and `wlan0`. Passive scanning, WPA association, DHCP, gateway reachability, and SSH over Wi-Fi are verified. See the [hardware result](./evidence/v15-wlan-link.md) and [handoff](./docs/HANDOFF.md).
+* **Core Kernel:** Linux 7.2.0 (`postmarketOS/v7.2` branch). Kernel Build #8 (`Linux 7.2.0-cmf-wifi-pmic+ #8`) verified running on the phone.
+* **Bootchain:** Verified on physical hardware after flashing diagnostic / mainline images to `boot_a`. The bootloader rejects `fastboot boot`.
+* **Serial Debug Console:** Interactive root shell operational over USB CDC-ACM gadget (`/dev/ttyGS0`, host `/dev/cu.usbmodem01234567891`).
+* **Display & Console:** AMOLED 1080×2400 @ 32bpp operational via `simpledrm` and `/chosen/framebuffer@fe0d0000`. Hardware pitch aligned to 4352 bytes (64-byte RDMA alignment). Console font scaled to $16\times 32$ Terminus Bold ($67\text{ cols}\times 75\text{ rows}$) via `tools/setfont32.c`. See [evidence/v15-display-framebuffer.md](./evidence/v15-display-framebuffer.md).
+* **SPMI RF PMIC Driver:** Ported `drivers/regulator/mt636x-rf-regulator.c` with `CONFIG_REGULATOR_MT636X_RF=y`. Both MT6363 (`0-04`) and MT6369 (`0-05`) bind successfully to `mt636x-rf-regulator`.
+* **Storage Stack:** SKhynix UFS 2.2 fully enumerated (`/dev/sda`, `/dev/sdb`, `/dev/sdc` with all 83 partitions).
+* **Kali NetHunter Rootfs Container (Method A):** Exported 13 GB Kali NetHunter rootfs from encrypted Android 16 userdata (`/data/local/nhsystem/kali-arm64`) into a self-contained 16 GB sparse ext4 image (`/data/local/kali-rootfs.img`), allowing mainline Linux access without breaking Android 16 FBE encryption.
+* **Connectivity & Networking:** Build #8 restores the MT6878 connectivity power domain. Bluetooth and Wi-Fi calibration pass and the private profile starts Wi-Fi and root SSH on boot. See the [hardware result](./evidence/build8-wifi-fix.md).
 
 ---
 

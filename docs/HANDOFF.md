@@ -1,6 +1,29 @@
 # CMF Phone 1 mainline handoff
 
-## Resume from the live v15 Wi-Fi shell
+## Resume from the live Build #8 Wi-Fi shell
+
+The phone is on slot A with kernel `7.2.0-cmf-wifi-pmic+ #8`. Its
+MT6878 connectivity power controller and ConnInfra drivers bind, both
+radio calibration callbacks pass, and the boot profile starts Wi-Fi and
+key-only SSH automatically. Use the local
+`cmf-mainline/lab/v15-link/SSH to CMF.command` launcher to reconnect.
+The [Build #8 hardware receipt](../evidence/build8-wifi-fix.md) records
+the failure that was fixed and the verification evidence.
+
+Build #8 uses the same device tree and private profile layout as Build #7.
+The profile is locally personalized. Its Wi-Fi credential and SSH host
+key stay in the private image and on the phone. The local artifact
+directory is `cmf-mainline/lab/build7-wifi-fix/`. Its
+`private-path.txt` points to the signed image's parent directory on
+the Mac. The Ubuntu result is at
+`~/cmf-template-fast/conn-domain-fix.tTXm2T/Image`. The Android rollback
+remains `cmf-mainline/rollback/slot-a-current/boot_a.img`.
+
+The [Build #7 receipt](../evidence/v16-hardware-rf-pmic-receipt.md) covers
+the display, RF PMIC integration, UFS enumeration, and Android-side Kali
+rootfs export.
+
+## Prior Milestone: v15 Wi-Fi Shell
 
 v15 passed both calibration callbacks, passive scanning, WPA association,
 DHCP, gateway ping, and key-authenticated root SSH from the Mac. The phone

@@ -5,7 +5,8 @@
 #   them internally, which masked the problem. v9 exports PATH and invokes the
 #   shell by absolute path.
 # One USB ACM function only (macOS binds single-function CDC ACM reliably).
-/bin/busybox --install -s /bin 2>/dev/null
+ln -sf /bin/busybox /bin/sh 2>/dev/null || true
+/bin/busybox --install -s 2>/dev/null || true
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root
 
@@ -33,7 +34,7 @@ if [ -c /dev/tty0 ]; then
         echo "  Kernel: $(uname -r)"
         echo "  USB: single ACM console"
         echo "=========================================="
-        dmesg | tail -n 25
+        /bin/busybox dmesg 2>/dev/null | /bin/busybox tail -n 25 || true
     } > /dev/tty0 2>/dev/null
 fi
 
@@ -62,9 +63,13 @@ fi
 
 i=0
 UDC=""
-while [ $i -lt 10 ]; do
-    UDC=$(ls /sys/class/udc 2>/dev/null | head -n 1)
-    [ -n "$UDC" ] && break
+while [ $i -lt 15 ]; do
+    for u in /sys/class/udc/*; do
+        if [ -e "$u" ]; then
+            UDC="${u##*/}"
+            break 2
+        fi
+    done
     sleep 1
     i=$((i + 1))
 done
@@ -74,7 +79,7 @@ if [ -n "$UDC" ]; then
     echo "$UDC" > "$G/UDC" 2>/dev/null
     echo "<6>initramfs: gadget bound to $(cat "$G/UDC" 2>/dev/null)"
 else
-    echo "<3>initramfs: no UDC after 10s (expected under QEMU)"
+    echo "<3>initramfs: no UDC after 15s (expected under QEMU)"
 fi
 
 i=0
@@ -91,7 +96,7 @@ if [ -c /dev/ttyGS0 ]; then
     [ -x "$SH" ] || SH=/bin/busybox
     echo "<6>initramfs: shell binary = $SH"
     (
-        dmesg > /dev/ttyGS0 2>/dev/null
+        /bin/busybox dmesg > /dev/ttyGS0 2>/dev/null || true
         while true; do
             printf '\r\n=== CMF mainline v9 shell (%s) — type commands ===\r\n' "$SH" > /dev/ttyGS0 2>/dev/null
             setsid "$SH" -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1
@@ -106,6 +111,6 @@ fi
 while true; do
     sleep 30
     if [ -c /dev/tty0 ]; then
-        dmesg | tail -n 12 > /dev/tty0 2>/dev/null
+        /bin/busybox dmesg 2>/dev/null | /bin/busybox tail -n 12 > /dev/tty0 2>/dev/null || true
     fi
 done
