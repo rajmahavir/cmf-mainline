@@ -1,0 +1,614 @@
+{
+  "input": "/home/raj/mt6878-mainline/out/diagnostic-v9-final/boot.img",
+  "boot_bytes": 67108864,
+  "boot_sha256": "c05205440c7baef1fa68a89b6cabf5b422247fca10e95121f3678c9d67d98cfe",
+  "header_version": 4,
+  "kernel_size": 15359118,
+  "ramdisk_size": 0,
+  "wrapper_header": {
+    "code0": 335544336,
+    "code1": 0,
+    "text_offset": 0,
+    "image_size": 40239104,
+    "flags": 10,
+    "reserved2": 0,
+    "reserved3": 0,
+    "reserved4": 0,
+    "magic": 1682788929,
+    "pe_offset": 0
+  },
+  "kernel_header": {
+    "code0": 4198521421,
+    "code1": 343422013,
+    "text_offset": 0,
+    "image_size": 38141952,
+    "flags": 10,
+    "reserved2": 0,
+    "reserved3": 0,
+    "reserved4": 0,
+    "magic": 1682788929,
+    "pe_offset": 64
+  },
+  "wrapper_words_0x40": [
+    "0x10007e00",
+    "0xaa1f03e1",
+    "0xaa1f03e2",
+    "0xaa1f03e3",
+    "0x10000004",
+    "0xd1014084",
+    "0x91480084",
+    "0xd61f0080"
+  ],
+  "decoded_wrapper": {
+    "dtb_offset": "0x1000",
+    "branch_offset": "0x200000",
+    "x1_x2_x3_zero": true
+  },
+  "busybox_elf": {
+    "magic": "7f454c46",
+    "class": 2,
+    "machine": 183,
+    "has_interpreter": false
+  },
+  "initramfs_image_offset": "0x2033dcc",
+  "cpio_entries": [
+    {
+      "name": "bin",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "bin/busybox",
+      "mode": "0o100755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 1710600,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "4d60ab3f5a59ebb2ca863f2f514e6924401b581e9b64f602665c008177626651"
+    },
+    {
+      "name": "dev",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "init",
+      "mode": "0o100755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 2980,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "252a42aa350ff2ee6bdc0cefaebb6cb6de41e5aa563248bfb3fc982ad24110d1"
+    },
+    {
+      "name": "proc",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "run",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "sys",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "tmp",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev",
+      "mode": "0o40755",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 0,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev/console",
+      "mode": "0o20600",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 5,
+      "rdev_minor": 1,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev/null",
+      "mode": "0o20666",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 1,
+      "rdev_minor": 3,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev/kmsg",
+      "mode": "0o20600",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 1,
+      "rdev_minor": 11,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev/tty0",
+      "mode": "0o20600",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 4,
+      "rdev_minor": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev/random",
+      "mode": "0o20666",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 1,
+      "rdev_minor": 8,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "dev/urandom",
+      "mode": "0o20666",
+      "uid": 0,
+      "gid": 0,
+      "bytes": 0,
+      "rdev_major": 1,
+      "rdev_minor": 9,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  ],
+  "avb": {
+    "original_image_size": 15364096,
+    "vbmeta_offset": 15364096,
+    "vbmeta_size": 1664,
+    "algorithm_type": 1,
+    "flags": 0,
+    "hash_descriptors": [
+      {
+        "partition": "boot",
+        "image_size": 15364096,
+        "algorithm": "sha256",
+        "flags": 0,
+        "digest_matches": true
+      }
+    ],
+    "rsa_signature_verified_here": false
+  },
+  "dtb_diff_from_baseline": [],
+  "header_reservations": [],
+  "memory_ranges": [
+    {
+      "path": "/reserved-memory/mblock-47-sspm_ap-shared",
+      "address": "0x7f970000",
+      "size": "0x110000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-46-me_GPUEB_SHARED",
+      "address": "0x7fe70000",
+      "size": "0x180000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-45-adsp_shared_reserved",
+      "address": "0x9e000000",
+      "size": "0xb70000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-44-debug_met_res-ram",
+      "address": "0x9f3ff000",
+      "size": "0xc00000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-43-consys_scp_emi-reserved",
+      "address": "0x87f00000",
+      "size": "0x20000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-42-shared-dma-pool_wifi-reserve-memory_dma",
+      "address": "0x86b00000",
+      "size": "0x1400000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-41-consys_emi_reserved",
+      "address": "0x85e00000",
+      "size": "0xd00000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-40-me_GPUmputab_PMA",
+      "address": "0x7e800000",
+      "size": "0x600000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-39-me_vcp_reserved",
+      "address": "0xbf500000",
+      "size": "0x800000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-38-md_mem_usage",
+      "address": "0xed780000",
+      "size": "0x880000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-37-md_mem_usage",
+      "address": "0xd4000000",
+      "size": "0x6fa0000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-36-md_mem_usage",
+      "address": "0xd3500000",
+      "size": "0x250000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-35-ap_md_c_smem",
+      "address": "0x88000000",
+      "size": "0x2560000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-34-ap_md_nc_smem",
+      "address": "0x8c000000",
+      "size": "0x130000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-33-md_mem_usage",
+      "address": "0xd0000000",
+      "size": "0x34e0000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-32-ccci_tag_mem",
+      "address": "0xbfdf0000",
+      "size": "0x10000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-31-apu_sapu_apurvgzctrlshm",
+      "address": "0x8f600000",
+      "size": "0x100000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-30-apu_apusys-rv_aee-coredump",
+      "address": "0x8f7a0000",
+      "size": "0x260000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-29-mm_ccu_reserved",
+      "address": "0x80000000",
+      "size": "0x100000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-28-reserve-memory-scp_share",
+      "address": "0x8e000000",
+      "size": "0x11c8000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-27-SCP-reserved",
+      "address": "0xb8000000",
+      "size": "0x2300000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-26-apu_apusys-rv_secure",
+      "address": "0x8fa00000",
+      "size": "0x600000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-25-platform-debug_dfdsoc_dump",
+      "address": "0xf9c00000",
+      "size": "0x200000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-24-tee-reserved",
+      "address": "0x70000000",
+      "size": "0x6c00000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-23-tee-secmem",
+      "address": "0x7f000000",
+      "size": "0x900000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-22-MCUPM-reserved",
+      "address": "0x7fa80000",
+      "size": "0x100000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-21-SSPM-reserved",
+      "address": "0x7fb80000",
+      "size": "0x280000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-20-gz-log",
+      "address": "0x23de00000",
+      "size": "0x41000",
+      "no_map": false,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-19-unmap2",
+      "address": "0x23e000000",
+      "size": "0x200000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-18-platform_mtksmmu_protpgd",
+      "address": "0xf9e00000",
+      "size": "0x4200000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-17-gz",
+      "address": "0x23e400000",
+      "size": "0x1a00000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-16-me_cmdq_reserved",
+      "address": "0x23fe00000",
+      "size": "0x100000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-15-framebuffer",
+      "address": "0xfe0d0000",
+      "size": "0x1f2f000",
+      "no_map": false,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-14-me_gpu_reserved",
+      "address": "0x7ee00000",
+      "size": "0x200000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-13-security_dice_common",
+      "address": "0x6fffe000",
+      "size": "0x1000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-12-atf-log-reserved",
+      "address": "0xbfe00000",
+      "size": "0x200000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-11-log_store",
+      "address": "0x23ffbf000",
+      "size": "0x40000",
+      "no_map": false,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-10-emi_mbist_buf",
+      "address": "0x7ffff000",
+      "size": "0x1000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-9-dramc-rk1",
+      "address": "0x23ffff000",
+      "size": "0x1000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-8-dramc-rk0",
+      "address": "0x13ffff000",
+      "size": "0x1000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-7-platform-debug_dfdmcu_dump",
+      "address": "0xf9000000",
+      "size": "0x100000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-6-crypto_hw",
+      "address": "0x48401000",
+      "size": "0x1000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-5-aee_lk",
+      "address": "0x7e000000",
+      "size": "0x800000",
+      "no_map": false,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-4-BL31-reserved",
+      "address": "0x48800000",
+      "size": "0x200000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-3-minirdump",
+      "address": "0x48170000",
+      "size": "0x10000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-2-pstore@48090000",
+      "address": "0x48090000",
+      "size": "0xe0000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/reserved-memory/mblock-1-aee_debug_kinfo",
+      "address": "0x48080000",
+      "size": "0x10000",
+      "no_map": true,
+      "kind": "reserved"
+    },
+    {
+      "path": "/memory",
+      "address": "0x40000000",
+      "size": "0x200000000",
+      "no_map": false,
+      "kind": "memory"
+    }
+  ],
+  "wrapper_protocol_checks": {
+    "covers_kernel_effective_span": true,
+    "kernel_flags_match": true,
+    "kernel_file_fits_effective_span": true,
+    "dtb_fits_prefix": true,
+    "dtb_aligned_8": true
+  },
+  "placement": {
+    "assumed_lk_destination": "0x40000000",
+    "raw_payload_end": "0x425afa00",
+    "kernel_start": "0x40200000",
+    "kernel_effective_end": "0x42660000",
+    "kernel_alignment_valid": true,
+    "dtb_start": "0x40001000",
+    "dtb_end": "0x40005d33",
+    "overlaps": []
+  },
+  "extracted": {
+    "payload.bin.gz": {
+      "bytes": 15359118,
+      "sha256": "7a8da745d7ce5eed7c0ff2636ab30cadd5c9401ff82633589e00b9eb0d1b0405"
+    },
+    "payload_raw.bin": {
+      "bytes": 39516672,
+      "sha256": "0698ec22006717fdacc2deafb89858f6cc3510d2995f814d04eac3f62a38e531"
+    },
+    "Image": {
+      "bytes": 37419520,
+      "sha256": "198a41f60bbdd5cec75ca5ad3a983edf3eb7874794ba130e4d1c798f32afa42e"
+    },
+    "candidate.dtb": {
+      "bytes": 19763,
+      "sha256": "ce217bc0c30e0ba59700086bb75372cb84c096629f9c9558529bb618ce04c895"
+    },
+    "wrapper.bin": {
+      "bytes": 128,
+      "sha256": "68ecfa5a0d6a7d6727a418a36e89de85c4d11efdcd2fead0712309abc2308cef"
+    },
+    "kernel.config": {
+      "bytes": 194876,
+      "sha256": "69b45d8e4d3111ba3c37650cccebf0210ca6a05be3ce0a53acf50daf3b24d265"
+    },
+    "initramfs.cpio": {
+      "bytes": 1715712,
+      "sha256": "2dd2707b924d72c8e5ba2b3fd2d70654968acdfbeb2d14b797c222067555dbb3"
+    },
+    "init": {
+      "bytes": 2980,
+      "sha256": "252a42aa350ff2ee6bdc0cefaebb6cb6de41e5aa563248bfb3fc982ad24110d1"
+    }
+  }
+}

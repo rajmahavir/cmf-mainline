@@ -1,0 +1,119 @@
+make: Entering directory '/home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/linux'
+make[1]: Entering directory '/home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/bt-calibration.uKblFsn1/mt66xx/6878'
+[bt_drv] btif/Kbuild KO_PATH=/home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/bt-calibration.uKblFsn1/mt66xx/6878 DEVICE_MODULES_PATH=/home/raj/cmfkali-v2-build/kernel_device_modules-6.1
+[BT_Drv][btif] TARGET_BUILD_VARIANT = user
+[BT_Drv][btif] BT_PLATFORM = 6878
+[BT_Drv][btif] srctree = /home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/linux
+[BT_Drv][btif] support bin to img
+  CC [M]  btif/btmtk_btif_main.o
+btif/btmtk_btif_main.c:147:9: warning: no previous prototype for function 'bt_reg_deinit' [-Wmissing-prototypes]
+  147 | int32_t bt_reg_deinit(void)
+      |         ^
+btif/btmtk_btif_main.c:147:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  147 | int32_t bt_reg_deinit(void)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:268:6: warning: no previous prototype for function 'btmtk_cif_dump_btif_tx_no_rsp' [-Wmissing-prototypes]
+  268 | void btmtk_cif_dump_btif_tx_no_rsp(void)
+      |      ^
+btif/btmtk_btif_main.c:268:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  268 | void btmtk_cif_dump_btif_tx_no_rsp(void)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:709:6: warning: no previous prototype for function 'btmtk_time_change_notify' [-Wmissing-prototypes]
+  709 | void btmtk_time_change_notify(void)
+      |      ^
+btif/btmtk_btif_main.c:709:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  709 | void btmtk_time_change_notify(void)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:788:5: warning: no previous prototype for function 'bt_pwrctrl_level_change_cb' [-Wmissing-prototypes]
+  788 | int bt_pwrctrl_level_change_cb(enum conn_pwr_event_type type, void *data)
+      |     ^
+btif/btmtk_btif_main.c:788:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  788 | int bt_pwrctrl_level_change_cb(enum conn_pwr_event_type type, void *data)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:832:6: warning: no previous prototype for function 'bt_pwrctrl_register_evt' [-Wmissing-prototypes]
+  832 | void bt_pwrctrl_register_evt(void)
+      |      ^
+btif/btmtk_btif_main.c:832:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  832 | void bt_pwrctrl_register_evt(void)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:929:5: warning: no previous prototype for function 'btmtk_cif_rx_packet_handler' [-Wmissing-prototypes]
+  929 | int btmtk_cif_rx_packet_handler(struct hci_dev *hdev, struct sk_buff *skb)
+      |     ^
+btif/btmtk_btif_main.c:929:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+  929 | int btmtk_cif_rx_packet_handler(struct hci_dev *hdev, struct sk_buff *skb)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1052:9: warning: no previous prototype for function 'btmtk_dispatch_event' [-Wmissing-prototypes]
+ 1052 | int32_t btmtk_dispatch_event(struct sk_buff *skb)
+      |         ^
+btif/btmtk_btif_main.c:1052:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1052 | int32_t btmtk_dispatch_event(struct sk_buff *skb)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1085:6: warning: no previous prototype for function 'btmtk_check_event_timeout' [-Wmissing-prototypes]
+ 1085 | void btmtk_check_event_timeout(struct sk_buff *skb)
+      |      ^
+btif/btmtk_btif_main.c:1085:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1085 | void btmtk_check_event_timeout(struct sk_buff *skb)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1141:9: warning: no previous prototype for function 'btmtk_wcn_beif_init' [-Wmissing-prototypes]
+ 1141 | int32_t btmtk_wcn_beif_init(void)
+      |         ^
+btif/btmtk_btif_main.c:1141:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1141 | int32_t btmtk_wcn_beif_init(void)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1275:5: warning: no previous prototype for function 'btmtk_btif_open' [-Wmissing-prototypes]
+ 1275 | int btmtk_btif_open(struct hci_dev *hdev)
+      |     ^
+btif/btmtk_btif_main.c:1275:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1275 | int btmtk_btif_open(struct hci_dev *hdev)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1286:5: warning: no previous prototype for function 'btmtk_btif_close' [-Wmissing-prototypes]
+ 1286 | int btmtk_btif_close(struct hci_dev *hdev)
+      |     ^
+btif/btmtk_btif_main.c:1286:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1286 | int btmtk_btif_close(struct hci_dev *hdev)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1297:5: warning: no previous prototype for function 'btmtk_btif_send_cmd_if' [-Wmissing-prototypes]
+ 1297 | int btmtk_btif_send_cmd_if(struct btmtk_dev *bdev, struct sk_buff *skb, int delay, int retry, int pkt_type)
+      |     ^
+btif/btmtk_btif_main.c:1297:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1297 | int btmtk_btif_send_cmd_if(struct btmtk_dev *bdev, struct sk_buff *skb, int delay, int retry, int pkt_type)
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1311:5: warning: no previous prototype for function 'btmtk_btif_send_and_recv' [-Wmissing-prototypes]
+ 1311 | int btmtk_btif_send_and_recv(struct btmtk_dev *bdev,
+      |     ^
+btif/btmtk_btif_main.c:1311:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1311 | int btmtk_btif_send_and_recv(struct btmtk_dev *bdev,
+      | ^
+      | static 
+btif/btmtk_btif_main.c:1467:5: warning: no previous prototype for function 'btmtk_btif_event_filter' [-Wmissing-prototypes]
+ 1467 | int btmtk_btif_event_filter(struct btmtk_dev *bdev, struct sk_buff *skb)
+      |     ^
+btif/btmtk_btif_main.c:1467:1: note: declare 'static' if the function is not intended to be used outside of this translation unit
+ 1467 | int btmtk_btif_event_filter(struct btmtk_dev *bdev, struct sk_buff *skb)
+      | ^
+      | static 
+14 warnings generated.
+  LD [M]  bt_drv_6878.o
+[bt_drv] btif/Kbuild KO_PATH=/home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/bt-calibration.uKblFsn1/mt66xx/6878 DEVICE_MODULES_PATH=/home/raj/cmfkali-v2-build/kernel_device_modules-6.1
+[BT_Drv][btif] TARGET_BUILD_VARIANT = user
+[BT_Drv][btif] BT_PLATFORM = 6878
+[BT_Drv][btif] srctree = /home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/linux
+[BT_Drv][btif] support bin to img
+  MODPOST Module.symvers
+  CC [M]  bt_drv_6878.mod.o
+  CC [M]  .module-common.o
+  LD [M]  bt_drv_6878.ko
+make[1]: Leaving directory '/home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/bt-calibration.uKblFsn1/mt66xx/6878'
+make: Leaving directory '/home/raj/mt6878-mainline/out/wifi-port-probe.Kl8geuUh/linux'

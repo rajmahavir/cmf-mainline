@@ -65,9 +65,24 @@ cmf-mainline/
 │   ├── rebuild-wifi-for-v11.sh
 │   ├── rebuild-wifi-for-pmic.sh
 │   └── verify-v11-eint.py
-└── docs/             # Audit logs and QEMU console verification
-    ├── qemu-console.log
-    └── v13-audit-summary.json
+├── evidence/         # Verifiable build logs, console transcripts & test receipts
+│   ├── README.md
+│   ├── hardware-boot-receipt.md
+│   ├── kernel-boot-build-receipt.txt
+│   ├── independent-audit-receipt.json
+│   ├── wlan-build-step20-receipt.txt
+│   ├── bt-build-step12-receipt.txt
+│   ├── v13-module-hashes-receipt.txt
+│   ├── eint-verified-receipt.txt
+│   ├── btf-verified-receipt.txt
+│   └── qemu-console-receipt.txt
+├── tools/            # Verification tooling and release gates
+│   └── milestone-gate.sh
+├── docs/             # Source provenance, audit logs, and QEMU console verification
+│   ├── PROVENANCE.md
+│   ├── qemu-console.log
+│   └── v13-audit-summary.json
+└── LICENSE           # GPL-2.0-only
 ```
 
 ---
@@ -110,8 +125,37 @@ insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/bt_drv_6878.ko
 
 ---
 
-## License & Credits
+## Verification Evidence & Receipts
 
-* Linux kernel patches are licensed under **GPL-2.0-only**.
-* MediaTek connectivity modules are based on MediaTek Open Source releases.
-* Developed by **Raj Mahavir** and contributors.
+All claims in this repository are backed by concrete text receipts located in the [evidence/](./evidence/) directory:
+* **Physical Hardware Execution:** Verified via fastboot tethered RAM boot with interactive `/dev/ttyGS0` console session ([hardware-boot-receipt.md](./evidence/hardware-boot-receipt.md)).
+* **Kernel & AVB Packaging:** Full build transcript with BTF and AVB header packaging ([kernel-boot-build-receipt.txt](./evidence/kernel-boot-build-receipt.txt)).
+* **Independent Audit:** Structural breakdown of the boot image and wrapper ([independent-audit-receipt.json](./evidence/independent-audit-receipt.json)).
+* **Connectivity Module Builds:** Clang/LLVM build logs for Wi-Fi ([wlan-build-step20-receipt.txt](./evidence/wlan-build-step20-receipt.txt)) and Bluetooth ([bt-build-step12-receipt.txt](./evidence/bt-build-step12-receipt.txt)).
+* **Cryptographic Signatures & Depmod:** SHA-256 digests of all 10 compiled modules ([v13-module-hashes-receipt.txt](./evidence/v13-module-hashes-receipt.txt)).
+* **Interrupt & BTF Verification:** EINT controller validation ([eint-verified-receipt.txt](./evidence/eint-verified-receipt.txt)) and BTF types ([btf-verified-receipt.txt](./evidence/btf-verified-receipt.txt)).
+
+---
+
+## Milestone Quality & Validation Gate
+
+To ensure that no broken patches, undocumented binaries, or gitignored audit trails slip into public releases, run the automated Milestone Closing Gate as the final step of each milestone:
+
+```sh
+./tools/milestone-gate.sh
+```
+
+The gate automatically enforces:
+1. Presence of `LICENSE` and `docs/PROVENANCE.md`.
+2. Strict `.gitignore` hygiene (no gitignored evidence, binaries ignored).
+3. Availability and integrity of all mandatory verification receipts.
+4. Absence of accidental large binary blobs (>20MB) in git index.
+5. Clean working tree and upstream branch tracking status.
+
+---
+
+## Provenance & License
+
+* Kernel diffs, device trees, and build tools are released under the [GNU General Public License v2.0](./LICENSE).
+* Upstream base commits, MediaTek BSP origins, and build reproducibility guidelines are detailed in [docs/PROVENANCE.md](./docs/PROVENANCE.md).
+* Developed by **Raj Mahavir** and the mainline community.

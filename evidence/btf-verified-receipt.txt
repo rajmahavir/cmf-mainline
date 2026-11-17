@@ -1,0 +1,3 @@
+Linux 7.2 BTF Feature Passes:
+encode_force,var,enum64,decl_tag,type_tag,consistent_func,decl_tag_kfuncs
+vmlinux and in-tree modules BTF validation: PASSED

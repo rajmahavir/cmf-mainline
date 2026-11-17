@@ -1,4 +1,4 @@
-# Build outputs and large binary blobs
+# Build outputs and large binary artifacts
 *.img
 *.bin
 *.elf
@@ -6,7 +6,13 @@
 *.ko
 *.tar.gz
 *.cpio
-*.log
 *.tmp
 *~
 .DS_Store
+
+# Ignore general temporary and build logs...
+*.log
+
+# ...BUT explicitly preserve curated receipts, test evidence, and audit logs:
+!docs/*.log
+!evidence/**

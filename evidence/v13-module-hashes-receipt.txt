@@ -1,0 +1,20 @@
+# MediaTek MT6878 Linux 7.2 Mainline Connectivity Modules (v13 Signed Build)
+# Kernel Release: 7.2.0-cmf-wifi-pmic+
+# Architecture: AArch64
+# Build Timestamp: 2026-11-16 19:20 IST
+
+00a746e04bc21eb141de6278cf838d8779df4a542480cc653ec92950744ac3f5  lib/modules/7.2.0-cmf-wifi-pmic+/extra/bluetooth.ko
+5748d6512630c3de5f3dc320b72358eb016a6438a3775ebd15b8ef76a166c103  lib/modules/7.2.0-cmf-wifi-pmic+/extra/bt_drv_6878.ko
+f3b8e9d3438e32f8aa43c56be460282790139d7028fc07917a2882408703d7ae  lib/modules/7.2.0-cmf-wifi-pmic+/extra/cfg80211.ko
+bd4c77ebf8924aac75ffcbea25c5723f5c629d7f78bf0391ba2e7140ee4d22f3  lib/modules/7.2.0-cmf-wifi-pmic+/extra/cmac.ko
+4e349cda99feb050fba1c2b68ee3817dbb26a187661b666a5190fdce42ecc530  lib/modules/7.2.0-cmf-wifi-pmic+/extra/connadp.ko
+b4586a159718e4223f3f7bf4a8004b386d0eec75c5d9ca25bd4363590f87d826  lib/modules/7.2.0-cmf-wifi-pmic+/extra/connfem.ko
+4cd768fab2bbc9811a5b8e26400dd32cc943688f22bc78453f5d56cfb34a5b26  lib/modules/7.2.0-cmf-wifi-pmic+/extra/conninfra.ko
+144a8590090df3d32b002d8e717a46430d86c50e962e56433ee4a193e4b8b8fd  lib/modules/7.2.0-cmf-wifi-pmic+/extra/rfkill.ko
+a1ef58b23308f7c03feeaf4b02ea1818cfcf4bf07eae482171b4a2cb651664de  lib/modules/7.2.0-cmf-wifi-pmic+/extra/wlan_drv_gen4m_6878.ko
+e70355429a210e7bd88a1d55c681bc4445aa7f6d00f16093a5e7abdd4dedd2e5  lib/modules/7.2.0-cmf-wifi-pmic+/extra/wmt_chrdev_wifi_connac2.ko
+
+# Depmod Dependency Verification
+depmod -a -e -F System.map: clean (0 unresolved symbols)
+wlan_drv_gen4m_6878 dependency chain:
+  connadp -> conninfra -> rfkill -> connfem -> wmt_chrdev_wifi_connac2 -> cfg80211 -> wlan_drv_gen4m_6878

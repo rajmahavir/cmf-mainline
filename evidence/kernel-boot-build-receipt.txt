@@ -1,0 +1,122 @@
+[1/8] copying v7 kernel build tree
+[2/8] assembling initramfs root
+[3/8] generating cpio
+[4/8] patching config and rebuilding Image
+make: Entering directory '/home/raj/mt6878-mainline/linux'
+make[1]: Entering directory '/home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel'
+  UPD     /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/Makefile
+#
+# No change to .config
+#
+make[1]: Leaving directory '/home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel'
+make: Leaving directory '/home/raj/mt6878-mainline/linux'
+make: Entering directory '/home/raj/mt6878-mainline/linux'
+make[1]: Entering directory '/home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel'
+  SYNC    include/config/auto.conf.cmd
+  DESCEND bpf/resolve_btfids
+  LD      arch/arm64/kernel/vdso/vdso.so.dbg
+  VDSOSYM include/generated/vdso-offsets.h
+  OBJCOPY arch/arm64/kernel/vdso/vdso.so
+  LD32    arch/arm64/kernel/vdso32/vdso.so.raw
+  MUNGE   arch/arm64/kernel/vdso32/vdso32.so.dbg
+  OBJCOPY arch/arm64/kernel/vdso32/vdso.so
+  INSTALL libsubcmd_headers
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/exec-cmd.o
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/help.o
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/pager.o
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/parse-options.o
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/run-command.o
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/sigchain.o
+  CC      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/subcmd-config.o
+  LD      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/libsubcmd-in.o
+  AR      /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/libsubcmd/libsubcmd.a
+  HOSTCC  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/main.o
+  HOSTCC  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/rbtree.o
+  HOSTCC  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/zalloc.o
+  HOSTCC  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/string.o
+  HOSTCC  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/ctype.o
+  HOSTCC  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/str_error_r.o
+  HOSTLD  /home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel/tools/bpf/resolve_btfids/resolve_btfids-in.o
+  LINK     resolve_btfids
+  GZIP    usr/initramfs_inc_data
+  AS      usr/initramfs_data.o
+  AR      usr/built-in.a
+  CC      arch/arm64/kernel/signal.o
+  UPD     kernel/config_data
+  GZIP    kernel/config_data.gz
+  CC      kernel/configs.o
+  AR      kernel/built-in.a
+  CC      arch/arm64/kernel/vdso.o
+  CC      arch/arm64/kernel/alternative.o
+  CC      arch/arm64/kernel/signal32.o
+  AS      arch/arm64/kernel/vdso-wrap.o
+  AS      arch/arm64/kernel/vdso32-wrap.o
+  AR      arch/arm64/kernel/built-in.a
+  AR      arch/arm64/built-in.a
+  AR      built-in.a
+  AR      built-in-fixup.a
+  COPY    vmlinux.a
+  GEN     .tmp_initcalls.lds
+  LD      vmlinux.o
+  MODPOST vmlinux.symvers
+  UPD     include/generated/utsversion.h
+  CC      init/version-timestamp.o
+  KSYMS   .tmp_vmlinux0.kallsyms.S
+  AS      .tmp_vmlinux0.kallsyms.o
+  LD      .tmp_vmlinux1
+  BTF     .tmp_vmlinux1
+  NM      .tmp_vmlinux1.syms
+  KSYMS   .tmp_vmlinux1.kallsyms.S
+  AS      .tmp_vmlinux1.kallsyms.o
+  LD      .tmp_vmlinux2
+  NM      .tmp_vmlinux2.syms
+  KSYMS   .tmp_vmlinux2.kallsyms.S
+  AS      .tmp_vmlinux2.kallsyms.o
+  LD      vmlinux.unstripped
+  BTFIDS  vmlinux.unstripped
+  NM      System.map
+  SORTTAB vmlinux.unstripped
+  OBJCOPY vmlinux
+  GEN     modules.builtin.modinfo
+  GEN     modules.builtin
+  OBJCOPY arch/arm64/boot/Image
+make[1]: Leaving directory '/home/raj/mt6878-mainline/out/diagnostic-v9-review/kernel'
+make: Leaving directory '/home/raj/mt6878-mainline/linux'
+[5/8] building fdt shim
+[6/8] packaging boot image
+[7/8] signing with AVB
+[8/8] manifest
+{
+  "boot.img": {
+    "bytes": 67108864,
+    "sha256": "129a39abb9564ca2f53857f0662609943795c587b0c32969ed750cb2ac0fdd21"
+  },
+  "payload_raw.bin": {
+    "bytes": 39516672,
+    "sha256": "34dc05e4d9a370bbe71fedd4f552dd0be4e919e7e9ca9b2e77020c7059fa929c"
+  },
+  "payload.bin.gz": {
+    "bytes": 15359185,
+    "sha256": "293dbd3d91acc0395b2b727163945822e830949757b303eddc3f68ad349452a0"
+  },
+  "candidate.dtb": {
+    "bytes": 19763,
+    "sha256": "ce217bc0c30e0ba59700086bb75372cb84c096629f9c9558529bb618ce04c895"
+  },
+  "initramfs.cpio": {
+    "bytes": 1715712,
+    "sha256": "b3533e5ceddde6a50fbbc98d581a81d9e2a6144a881e472dc8df753915dfb69d"
+  },
+  "fdt_shim.S": {
+    "bytes": 527,
+    "sha256": "8dc736ea799ef520858ac6062db70fa2d91b9a187514d8d5eeaf899ef373d8f1"
+  },
+  "fdt_shim.elf": {
+    "bytes": 39582768,
+    "sha256": "83d3decd502e8429487f448fc873f293e0e97eab449c4705cb1f3dbbd5a1b214"
+  },
+  "device-nodes.txt": {
+    "bytes": 201,
+    "sha256": "adeb7e74ed10db81558372294dbe0fea6f44ae14c280ab23da9b912892992c65"
+  }
+}

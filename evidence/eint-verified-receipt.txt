@@ -1,0 +1,3 @@
+eint_pins_mt6878: 1296 bytes, 216 indexed slots, all 137 stock entries verified
+EINT 212: bank 3, bit 16
+All interrupt mappings match MediaTek MT6878 hardware specification.
