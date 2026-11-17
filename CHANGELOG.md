@@ -2,13 +2,24 @@
 
 All times Asia/Kolkata (IST), 2026-11-16 unless noted.
 
+## 2026-11-17 19:53 IST — Android restore and Kali handoff
+
+- Restored the verified Android image to slot A's `boot_a` from bootloader
+  Fastboot. Android 16 completed boot, Wi-Fi reconnected, SELinux reported
+  Enforcing, and the `boot_a` read-back matched the saved image's SHA-256.
+- Confirmed `/data/local/kali-rootfs.img` is present with a logical size
+  of 17,179,869,184 bytes (16 GiB). Off-device export, copy completeness,
+  and a mainline chroot remain pending.
+- The live GPT inspection found no unallocated space on `/dev/sdc`.
+  See the [handoff](docs/HANDOFF.md) for how to resume without repartitioning.
+
 ## 2026-11-17 19:38 IST — Build #8 restores automatic Wi-Fi
 
 - Restored the MT6878 connectivity power-domain patch used by v15.
 - ConnInfra bound and initialized EMI. Bluetooth and Wi-Fi calibration
   returned zero.
 - WPA, DHCP, and pinned-key SSH started on both the first boot and
-  a subsequent software reboot. The phone remains on Build #8.
+  a subsequent software reboot. Build #8 was left running at that checkpoint.
 - Recorded the image hashes and test results in the
   [Build #8 hardware receipt](evidence/build8-wifi-fix.md).
 
@@ -16,12 +27,12 @@ All times Asia/Kolkata (IST), 2026-11-16 unless noted.
 
 - **Method A Kali NetHunter rootfs export:**
   - Investigated Android 16 File-Based Encryption (FBE) and hardware-backed metadata encryption (`dm-default-key`, `aes-xts-plain64` via Keymaster TEE in `/metadata/vold/metadata_encryption/`), which prevents direct block mounting of `/dev/sdc82` (`userdata`) from mainline Linux.
-  - Implemented unencrypted container export while keeping Android 16 fully functional:
+  - Created a plain ext4 image inside Android's encrypted userdata:
     - Allocated a 16 GB sparse ext4 image container at `/data/local/kali-rootfs.img`.
     - Resolved SEAndroid loopback block restriction (`EIO` error) by temporarily toggling `setenforce 0`.
-    - Mounted on `/mnt/kali_target` via loopback and performed a complete, lossless copy of the 13 GB Kali NetHunter rootfs (`cp -a /data/local/nhsystem/kali-arm64/* /mnt/kali_target/`).
+    - Mounted on `/mnt/kali_target` via loopback and copied the visible top-level entries of the roughly 13 GB Kali NetHunter rootfs (`cp -a /data/local/nhsystem/kali-arm64/* /mnt/kali_target/`).
     - Synced filesystem, cleanly unmounted, detached loop device, and restored SELinux to `Enforcing` (`setenforce 1`).
-    - Android 16 and original `/data/local/nhsystem/kali-arm64` remain 100% operational and intact.
+    - The original Android chroot was reported working afterward. The glob normally skips top-level dotfiles, and a source-to-image comparison is pending.
 - **SPMI RF PMIC Driver Integration (`mt636x-rf-regulator`):**
   - Resolved `wait_for_suppliers` timeout in `run-radio-test.sh` where SPMI slaves `0-04` (MT6363) and `0-05` (MT6369) failed to probe.
   - Ported `drivers/regulator/mt636x-rf-regulator.c` from vendor BSP, added Kconfig/Makefile bindings, enabled `CONFIG_REGULATOR_MT636X_RF=y` and `CONFIG_REGMAP_SPMI=y`.

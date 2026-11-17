@@ -15,7 +15,7 @@
 | **Compressed Payload** | `out/payload.bin.gz` | 13,220,966 | `6c47fc72cb25828450165db56fbfd64807f7cba766c0ce8ba77a166ff56f345c` |
 | **Mainline Boot Image** | `out/boot.img` | 67,108,864 | `8d0087d6109f2c7064b0ff2771959d0625b964e03ae5b5de0bfb47fca74a2d93` |
 | **Verified Android Rollback** | `rollback/slot-a-current/boot_a.img` | 67,108,864 | `eda9f9a5e32dcaf478e8464a473cfb0d1e447c52d97b2e76d1036ff4d7b370fb` |
-| **Kali NetHunter Container** | Handset `/data/local/kali-rootfs.img` | 17,179,869,184 | 16 GB sparse ext4 image (13 GB unencrypted Kali rootfs) |
+| **Kali NetHunter Container** | Handset `/data/local/kali-rootfs.img` | 17,179,869,184 | 16 GiB sparse ext4 image containing the Android-side Kali copy |
 
 ---
 
@@ -119,3 +119,8 @@ btmtk_wcn_beif_init emi_ap_phy_base is NULL
   4. Mounted on `/mnt/kali_target` and copied 13 GB chroot: `cp -a /data/local/nhsystem/kali-arm64/* /mnt/kali_target/`.
   5. Unmounted cleanly, detached loop device, and restored SELinux to `Enforcing` (`setenforce 1`).
   6. Verified Android 16 stability; original chroot remains completely functional in Android.
+
+The ext4 image file remains in encrypted Android userdata. The
+documented source glob normally skips top-level hidden entries.
+The receipt records the Android copy and cleanup. Off-device export
+and source-to-image validation remain separate milestones.

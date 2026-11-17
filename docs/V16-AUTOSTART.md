@@ -92,18 +92,30 @@ In earlier builds, `run-radio-test.sh` stalled at `wait_for_suppliers` because t
 
 ## Kali NetHunter Rootfs Container Architecture (Method A)
 
-The phone contains a 13 GB Kali NetHunter rootfs installed in Android's userdata partition (`/data/local/nhsystem/kali-arm64`).
+The Android-side export created a 16 GiB sparse ext4 image at
+`/data/local/kali-rootfs.img` and copied the roughly 13 GB Kali tree into
+it. Temporary SELinux permissive mode resolved loop-device access
+inside Android. The operator unmounted the image, detached the loop
+device, and restored SELinux to Enforcing. The original chroot was
+reported working after the export.
 
-### Android 16 FBE / Metadata Encryption Invariant
-Android 16 enforces hardware-backed File-Based Encryption (FBE) and full metadata encryption on `/dev/sdc82` (`userdata`) using `dm-default-key` with `aes-xts-plain64`. The encryption keys are wrapped by the hardware Keymaster/TEE and reside in `/metadata/vold/metadata_encryption/`. Mainline Linux cannot read raw blocks of `/dev/sdc82` without TEE key derivation.
+Android supplies decrypted reads through mounted `/data`, which
+uses FBE and metadata encryption on `userdata` (`/dev/sdc82`). The
+ext4 image's file remains under that encryption layer. To give Build
+#8 access, boot Android and copy the image to a host or storage that
+mainline can read. An NFS test would also need the matching Build #8
+client modules and mount helper. [Android metadata encryption](https://source.android.com/docs/security/features/encryption/metadata)
 
-### Unencrypted Sparse Container (Method A)
-To allow Kali NetHunter access without breaking Android 16:
-1. Created an unencrypted 16 GB sparse ext4 image at `/data/local/kali-rootfs.img` (`truncate -s 16G` and `mke2fs -t ext4 -F -O ^has_journal`).
-2. Resolved Android SEAndroid block loopback restriction (`I/O error` on `/dev/block/loop*`) by temporarily setting `setenforce 0`.
-3. Mounted the container on `/mnt/kali_target` and fully replicated the 13 GB chroot tree via `cp -a /data/local/nhsystem/kali-arm64/* /mnt/kali_target/`.
-4. Unmounted, detached the loop device, and restored SELinux to `Enforcing` (`setenforce 1`).
-5. The container is fully preserved and self-contained; Android 16 and original NetHunter remain completely functional.
+The recorded `cp -a source/* target/` normally skips hidden entries
+at the source's top level. Before treating the image as a complete
+backup, stop the original chroot, compare the source and image trees,
+and verify a read-only mount and Kali shell.
+
+A read-only live GPT inspection found no unallocated space on
+`/dev/sdc`. Creating a dedicated internal ext4 partition would
+require reclaiming space from the roughly 108 GiB Android userdata.
+Verify off-device Android and Kali backups and a GPT recovery path
+before planning any resize or recreation.
 
 ## Hardware Checkpoint: Kernel Build #7 Verification
 

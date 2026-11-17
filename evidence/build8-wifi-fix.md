@@ -35,3 +35,8 @@ A second run used a normal Linux restart issued over SSH. A different
 kernel boot ID confirmed the restart. The Mac authenticated over Wi-Fi
 again after 47 seconds. The DHCP renewal client was running and all five
 gateway pings replied. Build #8 was left running with Wi-Fi and SSH active.
+
+At the later November 17 pack-up, the saved Android image was restored
+to `boot_a`. Android 16 completed boot on slot A, Wi-Fi reconnected, and
+the partition read-back matched the saved image. See the
+[handoff](../docs/HANDOFF.md) for the current device state.

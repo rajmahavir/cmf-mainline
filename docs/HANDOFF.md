@@ -1,23 +1,43 @@
 # CMF Phone 1 mainline handoff
 
-## Resume from the live Build #8 Wi-Fi shell
+## Current state after pack-up
 
-The phone is on slot A with kernel `7.2.0-cmf-wifi-pmic+ #8`. Its
-MT6878 connectivity power controller and ConnInfra drivers bind, both
-radio calibration callbacks pass, and the boot profile starts Wi-Fi and
-key-only SSH automatically. Use the local
-`cmf-mainline/lab/v15-link/SSH to CMF.command` launcher to reconnect.
-The [Build #8 hardware receipt](../evidence/build8-wifi-fix.md) records
-the failure that was fixed and the verification evidence.
+The phone is back on Android 16 on slot A. It completed boot and rejoined
+Wi-Fi, and SELinux reported Enforcing. The read-back of `boot_a` matched
+the saved Android image at `cmf-mainline/rollback/slot-a-current/boot_a.img`.
+The local verification log is
+`cmf-mainline/evidence/build8-packup-android-restore.log`.
 
-Build #8 uses the same device tree and private profile layout as Build #7.
-The profile is locally personalized. Its Wi-Fi credential and SSH host
-key stay in the private image and on the phone. The local artifact
-directory is `cmf-mainline/lab/build7-wifi-fix/`. Its
-`private-path.txt` points to the signed image's parent directory on
-the Mac. The Ubuntu result is at
-`~/cmf-template-fast/conn-domain-fix.tTXm2T/Image`. The Android rollback
-remains `cmf-mainline/rollback/slot-a-current/boot_a.img`.
+## Resume Build #8
+
+Build #8 booted twice with automatic Wi-Fi and key-only SSH. To return to
+mainline, use the signed private image under the local directory recorded
+in `cmf-mainline/lab/build7-wifi-fix/private-path.txt`. Check its SHA-256
+against `cmf-mainline/lab/build7-wifi-fix/manifest.json`, verify slot A and
+bootloader Fastboot, and flash only `boot_a`. Keep the verified Android
+rollback available. After Build #8 boots, reconnect with
+`cmf-mainline/lab/v15-link/SSH to CMF.command`. The
+[Build #8 hardware receipt](../evidence/build8-wifi-fix.md) records both
+boots and the image hashes.
+
+Build #8 uses the Build #7 device tree and private profile layout. The
+Wi-Fi credential and SSH host key remain in the private image and on
+the phone. The Ubuntu build output is at
+`~/cmf-template-fast/conn-domain-fix.tTXm2T/Image`.
+
+## Resume Kali work from Android
+
+Android reports `/data/local/kali-rootfs.img` at 16 GiB. Keep working from
+Android until the file has been copied off-device and verified. Compare
+the source and image trees with the original chroot stopped. The recorded
+copy glob normally skips top-level hidden entries.
+
+For the first mainline test, serve a read-only copy from Ubuntu over NFS
+after building and staging the matching Build #8 NFS modules and mount
+helper. Verify that the phone can mount the export and start an ARM64
+Kali shell. The live GPT showed no unallocated space on `/dev/sdc`.
+The internal-partition option needs verified backups and a separate
+userdata and GPT recovery plan. See [Method A](./V16-AUTOSTART.md#kali-nethunter-rootfs-container-architecture-method-a).
 
 The [Build #7 receipt](../evidence/v16-hardware-rf-pmic-receipt.md) covers
 the display, RF PMIC integration, UFS enumeration, and Android-side Kali
@@ -28,7 +48,7 @@ rootfs export.
 v15 passed both calibration callbacks, passive scanning, WPA association,
 DHCP, gateway ping, and key-authenticated root SSH from the Mac. The phone
 was deliberately left running the v15 initramfs on slot A for shell access.
-For the live endpoint and pinned host key, use the local launcher
+For the endpoint and pinned host key used on mainline, see the local launcher
 `cmf-mainline/lab/v15-link/SSH to CMF.command`. Confirm the device state
 before starting a new capture. The rollback image remains in the local
 workspace. Read the [scan and link evidence](../evidence/v15-wlan-link.md)
