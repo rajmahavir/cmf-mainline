@@ -59,3 +59,22 @@ before another test. If the serial recovery path cannot reach Fastboot,
 use the manual bootloader mode from the local rollback document, confirm
 slot A and `is-userspace: no`, then restore the verified rollback image
 to `boot_a`. All hardware trials use slot A and write only `boot_a`.
+
+## Continuous trace checkpoint
+
+The full v14 run is saved under `evidence/v14-startup.aAi3Ys/`.
+`android-dmesg.txt` and `mainline-startup.kmsg` contain the Android and
+mainline startup sequences. The [curated PHY comparison](../evidence/v14-phy-startup-comparison.md)
+identifies the first failing firmware exchange and the FEM-only follow-up.
+The v14 capture verified rollback to Android after collecting the trace.
+
+The v15 FEM-only image is at
+`images/diagnostic-v15-android-fem-boot.img` in the local artifact directory.
+Its SHA-256 is
+`f3124e12765d188dfa7c3f4f3be3ec4769529fec7b271c17b30400b45212e528`.
+The build server's v15 output is `v15-fem.4i5S7q/image/` under the same
+build tree. To capture v15 with the existing bundle, set
+`CMF_DIAGNOSTIC_IMAGE` to the image path and `CMF_DIAGNOSTIC_SHA256` to its
+hash before running the capture command above. The device-tree diff
+removes the FEM subtree and the ten part-node phandles it referenced.
+The v14 kernel and signed modules are reused.

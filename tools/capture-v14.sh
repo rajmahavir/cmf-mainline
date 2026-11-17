@@ -8,7 +8,8 @@ umask 077
 logs=$(mktemp -d "$base/evidence/v14-startup.XXXXXX")
 echo "Evidence directory: $logs"
 serial=${CMF_DEVICE_SERIAL:?Set CMF_DEVICE_SERIAL to the phone serial from adb devices}
-candidate=$base/images/diagnostic-v14-mt6685-boot.img
+candidate=${CMF_DIAGNOSTIC_IMAGE:-$base/images/diagnostic-v14-mt6685-boot.img}
+candidate_hash=${CMF_DIAGNOSTIC_SHA256:-6c02de9a05403e0675a131c44d4bb1b6b92b724441df93e7656ee88ebb80dff7}
 restore=$base/rollback/slot-a-current/boot_a.img
 restore_hash=eda9f9a5e32dcaf478e8464a473cfb0d1e447c52d97b2e76d1036ff4d7b370fb
 fast() { fastboot -s "$serial" "$@"; }
@@ -48,7 +49,7 @@ recover() {
 test -s "$stage/radio-v14.tar.gz"
 test -s "$stage/reboot-bootloader"
 [[ $(shasum -a 256 "$restore" | awk '{print $1}') == "$restore_hash" ]]
-[[ $(shasum -a 256 "$candidate" | awk '{print $1}') == 6c02de9a05403e0675a131c44d4bb1b6b92b724441df93e7656ee88ebb80dff7 ]]
+[[ $(shasum -a 256 "$candidate" | awk '{print $1}') == "$candidate_hash" ]]
 [[ $(adb -s "$serial" shell 'su -c "sha256sum /dev/block/by-name/boot_a"' | awk '{print $1}') == "$restore_hash" ]]
 adb -s "$serial" shell 'su -c "dmesg"' > "$logs/android-dmesg.txt"
 adb -s "$serial" reboot bootloader
@@ -75,4 +76,8 @@ python3 "$tools_dir/diagnostic-console.py" run 'sh /tmp/cmf-v13/run-radio-test.s
 python3 "$tools_dir/diagnostic-console.py" run \
     'cd /tmp/cmf-v13 && kill "$(cat startup-kmsg.pid)" && test ! -s startup-kmsg.err && cat startup.kmsg' \
     60 > "$logs/mainline-startup.kmsg"
+if ((calibration_status == 0)); then
+    python3 "$tools_dir/diagnostic-console.py" run \
+        'sh /tmp/cmf-v13/run-radio-test.sh power' 35 > "$logs/mainline-power.log"
+fi
 exit "$calibration_status"

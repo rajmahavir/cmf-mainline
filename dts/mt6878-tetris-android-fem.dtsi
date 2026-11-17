@@ -1,0 +1,6 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+
+/* Match the missing EPA/ELNA data path observed on working Android. */
+&{/connfem} {
+	/delete-node/ epa-elna-mtk;
+};
