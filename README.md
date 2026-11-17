@@ -27,6 +27,7 @@ Upstream **Linux 7.2** mainline port for the **Nothing CMF Phone 1** (MediaTek D
 * **Serial Debug Console:** Interactive shell operational over USB CDC-ACM gadget (`/dev/ttyGS0`).
 * **Wi-Fi & Bluetooth Stack (v13):** MediaTek out-of-tree connectivity stack (`conninfra`, `connfem`, `connadp`, `wmt_chrdev`, `wlan_drv_gen4m_6878`, `bt_drv_6878`) backported to Linux 7.2, compiled against `7.2.0-cmf-wifi-pmic+` symbols, cryptographically signed, and verified with `depmod`.
 * **Device Tree:** Device tree sources include MT6878 PMIC regulator trees, fixed EINT interrupt indexing, reboot modes, and Bluetooth/Wi-Fi calibration nodes (`/bt@18800000`).
+* **Radio hardware (v15):** Bluetooth and Wi-Fi pre-calibration pass. The WLAN driver creates `phy0` and `wlan0`. Scan and association are pending. See the [hardware result](./evidence/v14-phy-startup-comparison.md) and [handoff](./docs/HANDOFF.md).
 
 ---
 

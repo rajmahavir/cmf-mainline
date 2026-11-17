@@ -1,19 +1,13 @@
 # CMF Phone 1 mainline handoff
 
-## Resume from v14
+## Resume from v15
 
-The hardware evidence and working Linux 7.2 radio stack are summarized in
-[v13 and v14 results](../evidence/v13-v14-radio-bringup.md). v14 supplies the
-MT6685 DCXO strap regmap. Bluetooth pre-calibration returns `0`. WLAN
-pre-calibration returns `-1` after a firmware assertion in
-`wifi/base/soc7_0/hal/phy/6631/hal_phy_rom.c:1361`. The vendor text can
-label this return value as success. Use the numeric calibration summary.
-
-The next comparison uses the same v14 image and same modules. Capture
-Android's working WLAN log and the complete mainline kernel ring before
-and after WLAN calibration. Compare firmware selection, NVRAM version,
-clock and RF front-end configuration, and PHY action events in startup
-order.
+The FEM-only v15 diagnostic passed Bluetooth and Wi-Fi pre-calibration and
+created `phy0` and `wlan0` on hardware. The test then restored Android.
+The next milestone is to run an `iw` scan, then verify association and IP
+traffic on mainline. Start from the same v15 boot image and RAM bundle.
+The [hardware comparison and result](../evidence/v14-phy-startup-comparison.md)
+records why the FEM subtree was removed and which changes were tested.
 
 ## Local workspace
 
@@ -75,6 +69,17 @@ Its SHA-256 is
 The build server's v15 output is `v15-fem.4i5S7q/image/` under the same
 build tree. To capture v15 with the existing bundle, set
 `CMF_DIAGNOSTIC_IMAGE` to the image path and `CMF_DIAGNOSTIC_SHA256` to its
-hash before running the capture command above. The device-tree diff
+hash before running the capture command above. Set `CMF_FEM_MODE=unbound`
+for this image. The ported ConnFEM module loads and exports its symbols,
+but the platform probe returns `-95` when the FEM data subtree is absent.
+The original preparation check expected a bound device and stopped the
+first v15 attempt before WLAN module load. The device-tree diff
 removes the FEM subtree and the ten part-node phandles it referenced.
 The v14 kernel and signed modules are reused.
+
+The successful v15 run is under `evidence/v14-startup.6eoNvH/` in the local
+artifact directory. Inspect `mainline-startup.kmsg` for the two PHY responses
+and calibration summary, `mainline-power.log` for interface enumeration, and
+`v14-mt6685-android-restore.log` for the rollback hash verification. The capture
+directory prefix and some log names retain `v14` for compatibility with the
+capture script. The candidate hash and v15 boot image identify the run.

@@ -26,3 +26,38 @@ symbols. This tests the hypothesis that the diagnostic's extra FEM data
 or its pinmux causes the assertion. The stock missing-data path and the
 time-sync difference were observed independently. Test the FEM change
 before changing command `0x09`.
+
+The time-sync difference has a separate test that needs no driver rebuild.
+The existing `kalSyncTimeToFW()` uses wall time and skips the command if
+the adapter's last update plus 7,200 seconds is later than the current
+wall clock. The diagnostic initramfs starts its clock at the Unix epoch.
+If the FEM-only test still asserts, try setting the running initramfs
+clock to the host UTC epoch immediately before loading the WLAN module.
+Verify whether `kalSyncTimeToFW` and command `0x09` then appear in the trace.
+
+## v15 FEM-only hardware result
+
+Removing `epa-elna-mtk` left the same ConnFEM module loaded without a bound
+FEM provider. The diagnostic kept the v14 kernel, firmware, NVRAM and module
+bundle. The DTB audit found only the removed FEM data properties and
+ten now-unreferenced part phandles. The boot image passed AVB and wrapper
+verification.
+
+The first PHY NVRAM command returned status `0x0`. The calibration command
+returned event `0x81`, status `0x0`, and the same EMI result offset and length
+as Android. The pre-calibration summary reported `bt_cal=[0]` and
+`wf_cal=[0]`. The power-on check then found `phy0` and `wlan0`.
+No host clock update or WLAN driver change was applied.
+
+```text
+HAL_PHY_ACTION_TAG_NVRAM status[0x0]
+HAL_PHY_ACTION_TAG_CAL ucEvent[0x81]status[0x0]emiAddr[0xf0b701a4]emiLen[0x2b000]
+[pre_cal] summary pwr=[693] bt_cal=[0][19] wf_cal=[0][2998] backup=[0]
+phy0
+lo     p2p0   p2p1   sit0   wlan0
+```
+
+This isolates the assert to the presence of the extra FEM configuration
+or its pinmux in the v14 diagnostic. Scan, association, IP traffic, and
+Bluetooth traffic still need separate verification. The v15 raw traces and
+boot image location are recorded in the [handoff](../docs/HANDOFF.md).

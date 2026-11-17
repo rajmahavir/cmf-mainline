@@ -33,7 +33,7 @@ if [ -f "$modules/mt6685-consys-regmap.ko" ]; then
 fi
 
 case "${1:-}" in
-prepare)
+prepare|prepare-unbound-fem)
     trap 'status=$?; if [ "$status" -ne 0 ]; then dmesg | tail -n 160; fi' EXIT
     sha256sum -c SHA256SUMS
     wait_for_suppliers
@@ -47,7 +47,13 @@ prepare)
     for module in cmac rfkill cfg80211 connadp connfem conninfra wmt_chrdev_wifi_connac2; do
         load_module "$module"
     done
-    test -L /sys/bus/platform/devices/connfem/driver
+    if [ "$1" = prepare-unbound-fem ]; then
+        test -d /sys/module/connfem
+        test ! -L /sys/bus/platform/devices/connfem/driver
+        echo 'ConnFEM module loaded with no bound FEM provider'
+    else
+        test -L /sys/bus/platform/devices/connfem/driver
+    fi
     test -L /sys/bus/platform/devices/18000000.consys/driver
     test -c /dev/wmtWifi
     if "$check_clock"; then
@@ -91,7 +97,7 @@ power)
     test -d /sys/class/net/wlan0
     ;;
 *)
-    echo "Usage: $0 prepare|calibrate|power" >&2
+    echo "Usage: $0 prepare|prepare-unbound-fem|calibrate|power" >&2
     exit 2
     ;;
 esac

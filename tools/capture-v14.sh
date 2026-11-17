@@ -10,6 +10,11 @@ echo "Evidence directory: $logs"
 serial=${CMF_DEVICE_SERIAL:?Set CMF_DEVICE_SERIAL to the phone serial from adb devices}
 candidate=${CMF_DIAGNOSTIC_IMAGE:-$base/images/diagnostic-v14-mt6685-boot.img}
 candidate_hash=${CMF_DIAGNOSTIC_SHA256:-6c02de9a05403e0675a131c44d4bb1b6b92b724441df93e7656ee88ebb80dff7}
+case "${CMF_FEM_MODE:-bound}" in
+    bound) prepare=prepare ;;
+    unbound) prepare=prepare-unbound-fem ;;
+    *) echo 'CMF_FEM_MODE must be bound or unbound' >&2; exit 2 ;;
+esac
 restore=$base/rollback/slot-a-current/boot_a.img
 restore_hash=eda9f9a5e32dcaf478e8464a473cfb0d1e447c52d97b2e76d1036ff4d7b370fb
 fast() { fastboot -s "$serial" "$@"; }
@@ -67,7 +72,9 @@ python3 "$tools_dir/diagnostic-console.py" bootcheck - 55 > "$logs/v14-mt6685-co
 python3 "$tools_dir/diagnostic-console.py" upload "$stage/reboot-bootloader" 20 >> "$logs/v14-mt6685-console.log"
 python3 "$tools_dir/diagnostic-console.py" run 'chmod 700 /tmp/cmf-v13/reboot-bootloader' 12 >> "$logs/v14-mt6685-console.log"
 python3 "$tools_dir/diagnostic-console.py" upload "$stage/radio-v14.tar.gz" 110 >> "$logs/v14-mt6685-console.log"
-python3 "$tools_dir/diagnostic-console.py" run 'cd /tmp/cmf-v13 && tar -xzf radio-v14.tar.gz && sh run-radio-test.sh prepare' 45 > "$logs/v14-mt6685-prepare.log"
+python3 "$tools_dir/diagnostic-console.py" run \
+    "cd /tmp/cmf-v13 && tar -xzf radio-v14.tar.gz && sh run-radio-test.sh $prepare" \
+    45 > "$logs/v14-mt6685-prepare.log"
 python3 "$tools_dir/diagnostic-console.py" run \
     'cd /tmp/cmf-v13 && (cat /dev/kmsg > startup.kmsg </dev/null 2>startup-kmsg.err & echo $! > startup-kmsg.pid)' \
     15 > "$logs/mainline-capture-start.txt"
