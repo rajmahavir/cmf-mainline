@@ -4,7 +4,7 @@
 * **SoC:** MediaTek Dimensity 7300 (`MT6878`)
 * **Execution Date:** November 16, 2026
 * **Kernel Version:** Linux `7.2.0-g12f2e9f040d0` (`postmarketOS/v7.2`)
-* **Boot Method:** Tethered in-RAM boot via Android fastboot (`fastboot boot boot.img`)
+* **Boot Method:** Bootloader Fastboot flash of the diagnostic image to `boot_a`
 * **Userspace Environment:** Diskless Alpine / Busybox initramfs executing completely in LPDDR4X RAM
 
 ---
@@ -12,76 +12,39 @@
 ## 1. Boot Command & Parameters
 
 ```sh
-# Boot image packaged with fdt_shim wrapper prepending candidate.dtb to Linux 7.2 Image
-fastboot boot out/diagnostic-v9-final/boot.img
+# Diagnostic boot image with the fdt_shim wrapper and candidate device tree
+fastboot flash boot_a out/diagnostic-v9-final/boot.img
+fastboot reboot
 ```
 
-* **Bootloader:** Little Kernel (LK) with AVB header v4 compliance
+The capability probe returned `FAILED (remote: 'unknown command')` for
+`fastboot boot`. The v9 test wrote the diagnostic to `boot_a`. After the test,
+the saved `boot_a` image was restored and Android completed boot on slot A.
+
+* **Bootloader:** Little Kernel (LK) with Android boot image header v4 support
 * **Memory Destination:** `0x40000000`
-* **Console Commandline:** `console=ttyGS0 earlycon`
+* **Console Command Line:** `console=tty0`. The initramfs opens the USB serial shell on `/dev/ttyGS0`.
 
 ---
 
-## 2. Host-Side USB CDC-ACM Enumeration
+## 2. USB CDC ACM enumeration
 
-When the Linux 7.2 kernel boots into userspace, the initramfs configures the USB gadget subsystem via `configfs`:
+The initramfs configured one CDC ACM function through configfs. The shell
+ran on the phone's `/dev/ttyGS0`. The test host opened
+`/dev/cu.usbmodem01234567891` on macOS.
 
-```sh
-# USB Gadget configuration in /init
-mount -t configfs configfs /sys/kernel/config
-mkdir -p /sys/kernel/config/usb_gadget/g1
-echo "0x1d6b" > /sys/kernel/config/usb_gadget/g1/idVendor
-echo "0x0104" > /sys/kernel/config/usb_gadget/g1/idProduct
-mkdir -p /sys/kernel/config/usb_gadget/g1/functions/acm.usb0
-mkdir -p /sys/kernel/config/usb_gadget/g1/configs/c.1
-ln -s /sys/kernel/config/usb_gadget/g1/functions/acm.usb0 /sys/kernel/config/usb_gadget/g1/configs/c.1/
-ls /sys/class/udc > /sys/kernel/config/usb_gadget/g1/UDC
-```
-
-On the host machine (connected via USB-C cable), the phone enumerates as a USB CDC ACM serial device:
+## 3. Physical serial console output
 
 ```text
-cdc_acm 1-1:1.0: ttyACM0: USB ACM device
-[host]# picocom -b 115200 /dev/ttyACM0
-```
-
----
-
-## 3. Physical Serial Console Session Transcript
-
-```text
-==========================================
-  NOTHING CMF PHONE 1 - MAINLINE 7.2 (v9)
-  Kernel: 7.2.0-g12f2e9f040d0 #12 SMP PREEMPT aarch64
-  USB: single ACM console
-==========================================
-
-=== MAINLINE 7.2 V9 INITRAMFS REACHED ===
-Linux (none) 7.2.0-g12f2e9f040d0 #12 SMP PREEMPT aarch64 Android
-
-/ # uname -a
-Linux (none) 7.2.0-g12f2e9f040d0 #12 SMP PREEMPT Mon Nov 16 13:42:24 IST 2026 aarch64 Android
-
-/ # cat /proc/cpuinfo | grep -E "processor|model name" | head -n 8
-processor       : 0
-model name      : ARMv8 Processor rev 2 (v8l)
-processor       : 1
-model name      : ARMv8 Processor rev 2 (v8l)
-processor       : 2
-model name      : ARMv8 Processor rev 2 (v8l)
-processor       : 3
-model name      : ARMv8 Processor rev 2 (v8l)
-
-/ # free -m
-              total        used        free      shared  buff/cache   available
-Mem:           7692         142        7550           0           0        7550
-Swap:             0           0           0
-
-/ # ls -l /dev/ttyGS0
-crw-------    1 root     root      242,   0 Jan  1 00:00 /dev/ttyGS0
+[    2.288013] === MAINLINE 7.2 V9 INITRAMFS REACHED ===
+[    2.313395] initramfs: ACM console ready on /dev/ttyGS0
+=== CMF mainline v9 shell — type commands ===
+CMF_V9_SHELL_OK
+7.2.0-g12f2e9f040d0
+uid=0(root) gid=0(root)
+CMF_V9_SHELL_DONE
 ```
 
 ### Result:
 * Physical silicon execution confirmed.
-* 8 GB system RAM detected and functional.
-* Interactive bidrectional terminal operational over USB serial without needing hardware UART soldering.
+* Interactive bidirectional terminal operational over USB serial without needing hardware UART soldering.

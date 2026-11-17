@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
+
+&{/soc@0/spmi@1cc04000} {
+	pmic@9 {
+		compatible = "mediatek,mt6685-consys-regmap";
+		reg = <9 0>;
+
+		mt6685-consys {
+			compatible = "mediatek,mt6685-consys";
+		};
+	};
+};

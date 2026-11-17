@@ -23,7 +23,7 @@ Upstream **Linux 7.2** mainline port for the **Nothing CMF Phone 1** (MediaTek D
 ## Current Status
 
 * **Core Kernel:** Linux 7.2.0 (`postmarketOS/v7.2` branch).
-* **Bootchain:** Verified on physical hardware in RAM via `fastboot boot`.
+* **Bootchain:** Verified on physical hardware after flashing the diagnostic image to `boot_a`. The bootloader rejects `fastboot boot`.
 * **Serial Debug Console:** Interactive shell operational over USB CDC-ACM gadget (`/dev/ttyGS0`).
 * **Wi-Fi & Bluetooth Stack (v13):** MediaTek out-of-tree connectivity stack (`conninfra`, `connfem`, `connadp`, `wmt_chrdev`, `wlan_drv_gen4m_6878`, `bt_drv_6878`) backported to Linux 7.2, compiled against `7.2.0-cmf-wifi-pmic+` symbols, cryptographically signed, and verified with `depmod`.
 * **Device Tree:** Device tree sources include MT6878 PMIC regulator trees, fixed EINT interrupt indexing, reboot modes, and Bluetooth/Wi-Fi calibration nodes (`/bt@18800000`).
@@ -97,38 +97,28 @@ MediaTek Little Kernel (LK) enforces Android Verified Boot (AVB) header v4 speci
 
 ---
 
-## Wi-Fi & Bluetooth Module Load Sequence
+## Wi-Fi and Bluetooth hardware test
 
-To initialize the CONNAC 2.0 wireless subsystem, the signed modules must be loaded in exact dependency order:
+Run [`tools/run-radio-test.sh`](./tools/run-radio-test.sh) from the extracted
+module bundle in the diagnostic initramfs. Supply the firmware and factory
+Wi-Fi NVRAM from the same handset in the bundle's `firmware/` directory.
 
 ```sh
-# 1. Connectivity bus adapter & infrastructure
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/connadp.ko
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/conninfra.ko
-
-# 2. RF Kill & Front-End Module
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/rfkill.ko
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/connfem.ko
-
-# 3. Wireless character device & 802.11 core
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/wmt_chrdev_wifi_connac2.ko
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/cfg80211.ko
-
-# 4. Primary Wi-Fi driver
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/wlan_drv_gen4m_6878.ko
-
-# 5. Bluetooth subsystem & MTK BT driver
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/bluetooth.ko
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/cmac.ko
-insmod lib/modules/7.2.0-cmf-wifi-pmic+/extra/bt_drv_6878.ko
+sh run-radio-test.sh prepare
+sh run-radio-test.sh calibrate
+sh run-radio-test.sh power
 ```
+
+The script verifies module hashes, waits for the RF PMICs, checks driver
+binding, and tests calibration and interface creation in separate steps.
+See the [v13 and v14 hardware results](./evidence/v13-v14-radio-bringup.md).
 
 ---
 
 ## Verification Evidence & Receipts
 
 All claims in this repository are backed by concrete text receipts located in the [evidence/](./evidence/) directory:
-* **Physical Hardware Execution:** Verified via fastboot tethered RAM boot with interactive `/dev/ttyGS0` console session ([hardware-boot-receipt.md](./evidence/hardware-boot-receipt.md)).
+* **Physical Hardware Execution:** Verified after flashing `boot_a`, with an interactive `/dev/ttyGS0` console session ([hardware-boot-receipt.md](./evidence/hardware-boot-receipt.md)).
 * **Kernel & AVB Packaging:** Full build transcript with BTF and AVB header packaging ([kernel-boot-build-receipt.txt](./evidence/kernel-boot-build-receipt.txt)).
 * **Independent Audit:** Structural breakdown of the boot image and wrapper ([independent-audit-receipt.json](./evidence/independent-audit-receipt.json)).
 * **Connectivity Module Builds:** Clang/LLVM build logs for Wi-Fi ([wlan-build-step20-receipt.txt](./evidence/wlan-build-step20-receipt.txt)) and Bluetooth ([bt-build-step12-receipt.txt](./evidence/bt-build-step12-receipt.txt)).
