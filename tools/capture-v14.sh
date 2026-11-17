@@ -53,6 +53,15 @@ recover() {
 }
 test -s "$stage/radio-v14.tar.gz"
 test -s "$stage/reboot-bootloader"
+if [[ -n ${CMF_WPA_CONFIG:-} ]]; then
+    test -s "$CMF_WPA_CONFIG"
+    [[ ${CMF_WPA_CONFIG##*/} == wpa.conf ]]
+fi
+if [[ -n ${CMF_SSH_PUBLIC_KEY:-} ]]; then
+    test -s "$CMF_SSH_PUBLIC_KEY"
+    [[ ${CMF_SSH_PUBLIC_KEY##*/} == cmf_authorized_keys ]]
+    [[ -n ${CMF_WPA_CONFIG:-} ]]
+fi
 [[ $(shasum -a 256 "$restore" | awk '{print $1}') == "$restore_hash" ]]
 [[ $(shasum -a 256 "$candidate" | awk '{print $1}') == "$candidate_hash" ]]
 [[ $(adb -s "$serial" shell 'su -c "sha256sum /dev/block/by-name/boot_a"' | awk '{print $1}') == "$restore_hash" ]]
@@ -86,5 +95,31 @@ python3 "$tools_dir/diagnostic-console.py" run \
 if ((calibration_status == 0)); then
     python3 "$tools_dir/diagnostic-console.py" run \
         'sh /tmp/cmf-v13/run-radio-test.sh power' 35 > "$logs/mainline-power.log"
+    if [[ ${CMF_TEST_SCAN:-0} == 1 ]]; then
+        scan_status=0
+        python3 "$tools_dir/diagnostic-console.py" run \
+            'sh /tmp/cmf-v13/run-radio-test.sh scan' 45 > "$logs/mainline-scan.log" || scan_status=$?
+        python3 "$tools_dir/diagnostic-console.py" run \
+            'dmesg -s 1048576' 35 > "$logs/mainline-after-scan.txt"
+        if ((scan_status != 0)); then exit "$scan_status"; fi
+    fi
+    if [[ -n ${CMF_WPA_CONFIG:-} ]]; then
+        python3 "$tools_dir/diagnostic-console.py" upload "$CMF_WPA_CONFIG" 20 > /dev/null
+        link_status=0
+        python3 "$tools_dir/diagnostic-console.py" run \
+            'sh /tmp/cmf-v13/run-radio-test.sh link' 65 > "$logs/mainline-link.log" || link_status=$?
+        python3 "$tools_dir/diagnostic-console.py" run \
+            'rm -f /tmp/cmf-v13/wpa.conf; dmesg -s 1048576' 35 > "$logs/mainline-after-link.txt"
+        if ((link_status == 0)) && [[ -n ${CMF_SSH_PUBLIC_KEY:-} ]]; then
+            python3 "$tools_dir/diagnostic-console.py" upload "$CMF_SSH_PUBLIC_KEY" 20 > /dev/null
+            python3 "$tools_dir/diagnostic-console.py" run \
+                'sh /tmp/cmf-v13/run-radio-test.sh ssh' 25 > "$logs/mainline-ssh.log"
+        fi
+        if ((link_status == 0)) && [[ ${CMF_KEEP_LINK:-0} == 1 ]]; then
+            trap - EXIT
+            echo "Leaving mainline running with the verified Wi-Fi link."
+        fi
+        exit "$link_status"
+    fi
 fi
 exit "$calibration_status"

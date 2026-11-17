@@ -1,13 +1,15 @@
 # CMF Phone 1 mainline handoff
 
-## Resume from v15
+## Resume from the live v15 Wi-Fi shell
 
-The FEM-only v15 diagnostic passed Bluetooth and Wi-Fi pre-calibration and
-created `phy0` and `wlan0` on hardware. The test then restored Android.
-The next milestone is to run an `iw` scan, then verify association and IP
-traffic on mainline. Start from the same v15 boot image and RAM bundle.
-The [hardware comparison and result](../evidence/v14-phy-startup-comparison.md)
-records why the FEM subtree was removed and which changes were tested.
+v15 passed both calibration callbacks, passive scanning, WPA association,
+DHCP, gateway ping, and key-authenticated root SSH from the Mac. The phone
+was deliberately left running the v15 initramfs on slot A for shell access.
+For the live endpoint and pinned host key, use the local launcher
+`cmf-mainline/lab/v15-link/SSH to CMF.command`. Confirm the device state
+before starting a new capture. The rollback image remains in the local
+workspace. Read the [scan and link evidence](../evidence/v15-wlan-link.md)
+and the [FEM comparison](../evidence/v14-phy-startup-comparison.md).
 
 ## Local workspace
 
@@ -83,3 +85,28 @@ and calibration summary, `mainline-power.log` for interface enumeration, and
 `v14-mt6685-android-restore.log` for the rollback hash verification. The capture
 directory prefix and some log names retain `v14` for compatibility with the
 capture script. The candidate hash and v15 boot image identify the run.
+
+## Reproduce WLAN and SSH testing
+
+For passive scanning, use `CMF_CAPTURE_ASSETS="$CMF_WORKSPACE/lab/v15-scan"`,
+`CMF_TEST_SCAN=1`, and the v15 image and FEM settings above. For association,
+use the bundle in `lab/v15-link/` and set `CMF_WPA_CONFIG` to a private,
+local file named `wpa.conf` containing a single authorized test network and
+`ctrl_interface=/tmp/cmf-wpa`. The capture uploads it into RAM and removes
+it after the link check. Keep credentials out of the repo and the reusable
+bundle.
+
+To start SSH, set `CMF_SSH_PUBLIC_KEY` to a local file named
+`cmf_authorized_keys` containing the authorized OpenSSH public key.
+Set `CMF_KEEP_LINK=1` to leave a successful session running. Without that
+setting, the capture restores Android. The phone generates an ephemeral
+host key in RAM and starts Dropbear on the WLAN IPv4 address, port 2222.
+The capture reports `SSH_ADDRESS` and `SSH_HOST_KEY` through USB so the client
+can pin the key before connecting. WPA and DHCP renewal stay running.
+Restarting the phone ends this live session.
+
+`tools/stage-scan-tools.py` stages the pinned Alpine AArch64 package
+files into an unpacked RAM bundle. Add `--wpa --ssh` for the full setup.
+The downloaded packages and their hashes are in local
+`lab/v14-startup/scan-packages/`. The raw scan and SSH verification traces
+are referenced by the [test evidence](../evidence/v15-wlan-link.md).

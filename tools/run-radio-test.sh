@@ -96,8 +96,75 @@ power)
     ls /sys/class/net
     test -d /sys/class/net/wlan0
     ;;
+scan)
+    trap 'status=$?; if [ "$status" -ne 0 ]; then dmesg | tail -n 160; fi' EXIT
+    test -d /sys/class/net/wlan0
+    ip link set wlan0 up
+    tools/ld-musl-aarch64.so.1 --library-path tools tools/iw --version
+    tools/ld-musl-aarch64.so.1 --library-path tools tools/iw reg get
+    tools/ld-musl-aarch64.so.1 --library-path tools tools/iw dev wlan0 scan passive
+    ;;
+link)
+    test -s wpa.conf
+    ip link set wlan0 up
+    tools/ld-musl-aarch64.so.1 --library-path tools tools/wpa_supplicant \
+        -B -P /tmp/cmf-wpa.pid -D nl80211 -i wlan0 -c "$PWD/wpa.conf"
+    for attempt in $(seq 1 25); do
+        state=$(tools/ld-musl-aarch64.so.1 --library-path tools tools/wpa_cli \
+            -p /tmp/cmf-wpa -i wlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
+        [ "$state" = COMPLETED ] && break
+        sleep 1
+    done
+    printf 'WPA state: %s\n' "$state"
+    if [ "$state" != COMPLETED ]; then
+        dmesg | tail -n 40
+        exit 1
+    fi
+    udhcpc -n -i wlan0 -t 5 -T 3 -p /tmp/cmf-udhcpc.pid -s "$PWD/run-radio-test.sh"
+    ip -4 addr show dev wlan0
+    gateway=$(ip -4 route show default dev wlan0 | awk '/^default via / {print $3; exit}')
+    test -n "$gateway"
+    ping -I wlan0 -c 3 -W 2 "$gateway"
+    ;;
+deconfig)
+    test "${interface:-}" = wlan0
+    ip -4 addr flush dev "$interface"
+    ;;
+bound|renew)
+    test "${interface:-}" = wlan0
+    ifconfig "$interface" "$ip" netmask "$subnet" up
+    set -- ${router:-}
+    if [ "$#" -gt 0 ]; then
+        ip -4 route replace default via "$1" dev "$interface"
+    fi
+    ;;
+ssh)
+    umask 077
+    test -s cmf_authorized_keys
+    if ! grep -q '^root:' /etc/passwd 2>/dev/null; then
+        mkdir -p /etc
+        printf 'root:x:0:0:root:/root:/bin/sh\n' >> /etc/passwd
+    fi
+    root_home=$(awk -F: '$1 == "root" {print $6; exit}' /etc/passwd)
+    test -n "$root_home"
+    mkdir -p "$root_home/.ssh"
+    chmod 700 "$root_home/.ssh"
+    cp cmf_authorized_keys "$root_home/.ssh/authorized_keys"
+    chmod 600 "$root_home/.ssh/authorized_keys"
+    rm -f cmf_authorized_keys
+    ipv4=$(ip -4 addr show dev wlan0 | awk '$1 == "inet" {split($2, a, "/"); print a[1]; exit}')
+    test -n "$ipv4"
+    host_key=/tmp/cmf-dropbear-ed25519
+    tools/ld-musl-aarch64.so.1 --library-path tools tools/dropbearkey \
+        -t ed25519 -f "$host_key" > /tmp/cmf-dropbear-hostkey.log
+    tools/ld-musl-aarch64.so.1 --library-path tools tools/dropbear \
+        -s -j -k -E -P /tmp/cmf-dropbear.pid -r "$host_key" -p "$ipv4:2222" 2>/tmp/cmf-dropbear.log
+    kill -0 "$(cat /tmp/cmf-dropbear.pid)"
+    printf 'SSH_ADDRESS %s\n' "$ipv4"
+    awk '$1 == "ssh-ed25519" {print "SSH_HOST_KEY", $1, $2}' /tmp/cmf-dropbear-hostkey.log
+    ;;
 *)
-    echo "Usage: $0 prepare|prepare-unbound-fem|calibrate|power" >&2
+    echo "Usage: $0 prepare|prepare-unbound-fem|calibrate|power|scan|link|ssh" >&2
     exit 2
     ;;
 esac
