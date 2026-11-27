@@ -11,8 +11,9 @@ if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
 fi
 
 control_flag=
-# CMF_KEY_ADDR=0x... overrides the Volume Down register (QEMU tests only).
-key_flag=${CMF_KEY_ADDR:+-DCMF_KEY_ADDR=$CMF_KEY_ADDR}
+# CMF_KEY_ADDR / CMF_OVL_BASE=0x... override the Volume Down register and the
+# display OVL block (QEMU tests only).
+key_flag="${CMF_KEY_ADDR:+-DCMF_KEY_ADDR=$CMF_KEY_ADDR} ${CMF_OVL_BASE:+-DCMF_OVL_BASE=$CMF_OVL_BASE}"
 case "${3:-}" in
     "") diagnostic=lk-modem-diag.c ;;
     --length-only) diagnostic=lk-modem-length.c ;;
@@ -26,7 +27,7 @@ libfdt=$(CDPATH='' cd -- "$1/scripts/dtc/libfdt" && pwd)
 mkdir -p -- "$2"
 cd -- "$2"
 
-for source in "$source_dir/lk-modem-diag.S" "$source_dir/$diagnostic" \
+for source in "$source_dir/lk-modem-diag.S" "$source_dir/$diagnostic" "$source_dir/boot-menu.c" \
     "$source_dir/lk-modem-diag-string.c" \
     "$libfdt/fdt.c" "$libfdt/fdt_ro.c" "$libfdt/fdt_wip.c" "$libfdt/fdt_rw.c" "$libfdt/fdt_addresses.c"
 do
@@ -38,7 +39,7 @@ do
         -c "$source" -o "$object.o"
 done
 ld.lld --gc-sections --no-undefined -T "$source_dir/lk-modem-diag.ld" \
-    lk-modem-diag.S.o "$diagnostic.o" lk-modem-diag-string.c.o \
+    lk-modem-diag.S.o "$diagnostic.o" boot-menu.c.o lk-modem-diag-string.c.o \
     fdt.c.o fdt_ro.c.o fdt_wip.c.o fdt_rw.c.o fdt_addresses.c.o -o lk-modem-diag.elf
 llvm-objcopy -O binary lk-modem-diag.elf lk-modem-diag.bin
 # The boot payload takes the entry code (shim header, at 0x0) and the helper

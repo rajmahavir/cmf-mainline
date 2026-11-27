@@ -11,6 +11,7 @@
 
 /* build the helper with -DCMF_HOST_TEST: it reads this instead of the GPIO */
 volatile uint32_t cmf_test_din = 0x0043C800;
+volatile uint32_t cmf_test_ovl[0x1000 / 4];   /* display registers: all 0, nothing drawn */
 
 #define CAPACITY (128 * 1024)
 #define GIB (1024ULL * 1024ULL * 1024ULL)
@@ -77,6 +78,9 @@ static void expect(const void *incoming, const char *status, const fdt32_t *bank
         assert(length == 16 * count && !memcmp(reg, banks, length));
         const fdt32_t *raw = fdt_getprop(target, chosen, "cmf,lk-memory-reg", &length);
         assert(raw && length == 16 * count && !memcmp(raw, banks, length));
+        const char *drawn = fdt_getprop(target, chosen, "cmf,lk-fb-drawn", &length);
+        assert(drawn && !strcmp(drawn, "no:registers"));
+        assert(fdt_getprop(target, chosen, "cmf,lk-ovl", &length) && length == 44);
     } else {
         assert(length == 16 && !memcmp(reg, before, 16));   /* built-in node kept */
     }

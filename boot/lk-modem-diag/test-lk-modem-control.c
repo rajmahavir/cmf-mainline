@@ -6,6 +6,7 @@
 
 /* build the helper with -DCMF_HOST_TEST: it reads this instead of the GPIO */
 volatile uint32_t cmf_test_din = 0x0043C800;
+volatile uint32_t cmf_test_ovl[0x1000 / 4];   /* display registers: all 0, nothing drawn */
 
 #define MODEM_PATH "/soc@0/mddriver@d180000"
 #define RECORD_PROPERTY "ccci,modem_info_v2"

@@ -296,17 +296,86 @@ extern volatile uint32_t cmf_test_din;
 #define CMF_GPIO_DIN1 0x10005210UL
 #endif
 
+/*
+ * Display (diagnostic for a boot menu): LK leaves its video-mode pipeline
+ * scanning OVL0_2L layer 0 out of a RAM framebuffer. Record the layer
+ * registers and LK's videolfb properties in /chosen, and draw a magenta box
+ * (the same colour in RGB or BGR order) if the registers look sane.
+ */
+#ifdef CMF_HOST_TEST
+extern volatile uint32_t cmf_test_ovl[0x1000 / 4];
+#define CMF_OVL_BASE ((uintptr_t)cmf_test_ovl)
+#elif !defined(CMF_OVL_BASE)
+#define CMF_OVL_BASE 0x14002000UL   /* QEMU tests override it */
+#endif
+
+static const uint16_t ovl_regs[] = {
+    0x00c, 0x02c, 0x030, 0x038, 0x040, 0x044, 0xf40,   /* EN, SRC_CON, layer 0 */
+    0x050, 0x058, 0x064, 0xf60,                        /* layer 1 */
+};
+
+static void display_diag(const void *source, void *target, int chosen)
+{
+    fdt32_t regs[sizeof(ovl_regs) / sizeof(*ovl_regs)];
+    const volatile uint32_t *ovl = (const volatile uint32_t *)CMF_OVL_BASE;
+    int from = fdt_path_offset(source, "/chosen");
+
+    for (unsigned int i = 0; i < sizeof(ovl_regs) / sizeof(*ovl_regs); i++)
+        regs[i] = cpu_to_fdt32(ovl[ovl_regs[i] / 4]);
+    fdt_setprop(target, chosen, "cmf,lk-ovl", regs, sizeof(regs));
+
+    if (from >= 0) {
+        int prop;
+
+        fdt_for_each_property_offset(prop, source, from) {
+            const char *name;
+            int length;
+            const void *value = fdt_getprop_by_offset(source, prop, &name, &length);
+            char copy[48] = "cmf,lk-";
+            size_t name_length = value ? strlen(name) : 0;
+
+            if (!value || length > 256 || name_length < 13 ||
+                name_length > sizeof(copy) - 8 || memcmp(name, "atag,videolfb", 13))
+                continue;
+            memcpy(copy + 7, name, name_length + 1);
+            fdt_setprop(target, chosen, copy, value, length);
+        }
+    }
+
+    uint32_t size = ovl[0x038 / 4], pitch = ovl[0x044 / 4] & 0xffff;
+    uintptr_t addr = ovl[0xf40 / 4];
+    uint32_t width = size & 0xffff, height = size >> 16;
+    const char *drawn = "no:registers";
+
+    if (width == 1080 && height == 2400 && pitch >= width * 4 && pitch <= 8192 &&
+        !(pitch & 3) && addr >= 0x40000000UL && !(addr & 0xfff) &&
+        ram_available(target, addr) >= (uint64_t)pitch * height) {
+        for (uint32_t y = 300; y < 500; y++) {
+            volatile uint32_t *row = (volatile uint32_t *)(addr + y * pitch);
+
+            for (uint32_t x = 100; x < 300; x++)
+                row[x] = 0xffff00ffU;
+        }
+        drawn = "yes";
+    }
+    fdt_setprop_string(target, chosen, "cmf,lk-fb-drawn", drawn);
+}
+
 void cmf_lk_modem_diag(const void *source, void *target)
 {
     fdt32_t din = cpu_to_fdt32(*(volatile uint32_t *)CMF_GPIO_DIN1);
 
     cmf_lk_modem_diag_modem(source, target);
+    /* checked before copy_memory replaces our memory node */
+    bool usable = source_usable(source, target);
     const char *memory = copy_memory(source, target);
     int chosen = fdt_path_offset(target, "/chosen");
 
     if (chosen >= 0) {
         fdt_setprop_string(target, chosen, "cmf,lk-memory", memory);
         fdt_setprop(target, chosen, "cmf,boot-key-din", &din, sizeof(din));
+        if (usable)
+            display_diag(source, target, chosen);
     }
 }
 
