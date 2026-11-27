@@ -11,6 +11,8 @@ if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
 fi
 
 control_flag=
+# CMF_KEY_ADDR=0x... overrides the Volume Down register (QEMU tests only).
+key_flag=${CMF_KEY_ADDR:+-DCMF_KEY_ADDR=$CMF_KEY_ADDR}
 case "${3:-}" in
     "") diagnostic=lk-modem-diag.c ;;
     --length-only) diagnostic=lk-modem-length.c ;;
@@ -32,10 +34,14 @@ do
     clang --target=aarch64-linux-gnu -march=armv8-a -mno-outline-atomics -mstrict-align \
         -mgeneral-regs-only -Oz -ffreestanding -fno-stack-protector \
         -fno-unwind-tables -fno-asynchronous-unwind-tables \
-        -fdata-sections -ffunction-sections $control_flag -I "$source_dir/include" -I "$libfdt" \
+        -fdata-sections -ffunction-sections $control_flag $key_flag -I "$source_dir/include" -I "$libfdt" \
         -c "$source" -o "$object.o"
 done
 ld.lld --gc-sections --no-undefined -T "$source_dir/lk-modem-diag.ld" \
     lk-modem-diag.S.o "$diagnostic.o" lk-modem-diag-string.c.o \
     fdt.c.o fdt_ro.c.o fdt_wip.c.o fdt_rw.c.o fdt_addresses.c.o -o lk-modem-diag.elf
 llvm-objcopy -O binary lk-modem-diag.elf lk-modem-diag.bin
+# The boot payload takes the entry code (shim header, at 0x0) and the helper
+# (at 0x10000) as two files: boot/prebuilt/shim-head.bin and lk-modem.bin.
+llvm-objcopy -O binary --only-section=.entry lk-modem-diag.elf shim-head.bin
+llvm-objcopy -O binary --remove-section=.entry lk-modem-diag.elf lk-modem.bin

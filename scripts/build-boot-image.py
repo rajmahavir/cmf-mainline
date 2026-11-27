@@ -3,6 +3,7 @@
 
 usage: build-boot-image.py --image Image --dtb cmf-phone-1.dtb --key avb.pem \
                            --aosp-tools DIR --out boot.img [--profile profile.tar.gz]
+                           [--android-boot android-boot.img] [--payload-out payload.bin]
 
 Layout of the kernel payload (gzip-compressed, as LK expects):
   0x000000  shim header (boot/prebuilt/shim-head.bin): an arm64 Image header whose
@@ -11,6 +12,10 @@ Layout of the kernel payload (gzip-compressed, as LK expects):
   0x010000  LK modem-record helper (boot/prebuilt/lk-modem.bin, source in
             boot/lk-modem-diag/) that forwards LK's modem record to the kernel DTB
   0x200000  the kernel Image (with its built-in initramfs)
+  (dual)    with --android-boot: the Android kernel from that boot image, at the
+            next 2 MiB boundary after Linux. Holding Volume Down at power-on
+            boots it with LK's own device tree and ramdisks (Android needs its
+            matching init_boot/vendor_boot in the same slot); otherwise Linux.
 
 The boot image is header v4, signed with an AVB hash footer for the 64 MiB boot
 partition. An unlocked bootloader accepts any key; generate your own with
@@ -32,6 +37,8 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DTB_OFFSET, LK_OFFSET, IMAGE_OFFSET = 0x1000, 0x10000, 0x200000
+ALIGN = 0x200000
+KERNEL_AREA = 0x7c80000   # LK's mb_kernel (0x40000000..0x47c80000, then its DTB)
 PARTITION_SIZE = 64 * 1024 * 1024
 PROFILE_OFFSET, PROFILE_HEADER = 32 * 1024 * 1024, 4096
 # AVB properties copied from the stock CMF Phone 1 boot image (Android 14 build).
@@ -39,15 +46,39 @@ FINGERPRINT = ("alps/hal_mgvi_64_64only_ww_armv82/mgvi_64_64only_ww_armv82:"
                "14/UP1A.231005.007/2609281140:user/release-keys")
 
 
+def android_kernel(path):
+    """The (decompressed) arm64 Image from an Android boot image."""
+    d = path.read_bytes()
+    assert d[:8] == b"ANDROID!", f"{path} is not an Android boot image"
+    size, version = struct.unpack_from("<I", d, 8)[0], struct.unpack_from("<I", d, 40)[0]
+    page = 4096 if version >= 3 else struct.unpack_from("<I", d, 36)[0]
+    k = d[page:page + size]
+    if k[:4] == b"\x02\x21\x4c\x18":          # LZ4 legacy, as Android uses
+        k = subprocess.run(["lz4", "-dc"], input=k, capture_output=True, check=True).stdout
+    elif k[:2] == b"\x1f\x8b":
+        k = gzip.decompress(k)
+    assert k[56:60] == b"ARMd", "Android kernel is not an arm64 Image"
+    assert struct.unpack_from("<Q", k, 8)[0] == 0, "Android kernel text_offset is not 0"
+    return k
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--image", required=True, type=Path)
     ap.add_argument("--dtb", required=True, type=Path)
-    ap.add_argument("--key", required=True, type=Path)
-    ap.add_argument("--aosp-tools", required=True, type=Path)
-    ap.add_argument("--out", required=True, type=Path)
+    ap.add_argument("--key", type=Path)
+    ap.add_argument("--aosp-tools", type=Path)
+    ap.add_argument("--out", type=Path)
     ap.add_argument("--profile", type=Path)
+    ap.add_argument("--android-boot", type=Path,
+                    help="Android boot image whose kernel to embed (Volume Down at power-on)")
+    ap.add_argument("--payload-out", type=Path,
+                    help="also write the uncompressed kernel payload (for QEMU tests)")
     a = ap.parse_args()
+    if a.out and not (a.key and a.aosp_tools):
+        ap.error("--out needs --key and --aosp-tools")
+    if not (a.out or a.payload_out):
+        ap.error("give --out and/or --payload-out")
 
     image = a.image.read_bytes()
     _, effective_size, flags = struct.unpack_from("<QQQ", image, 8)
@@ -59,12 +90,29 @@ def main():
     head = (REPO / "boot/prebuilt/shim-head.bin").read_bytes()
     lk = (REPO / "boot/prebuilt/lk-modem.bin").read_bytes()
 
+    assert len(head) <= DTB_OFFSET and len(lk) <= IMAGE_OFFSET - LK_OFFSET
     shim = bytearray(IMAGE_OFFSET)
     shim[:len(head)] = head
-    struct.pack_into("<QQ", shim, 16, IMAGE_OFFSET + effective_size, flags)
+    total = IMAGE_OFFSET + effective_size
+    tail = b""
+    if a.android_boot:
+        android = android_kernel(a.android_boot)
+        marker = head.find(b"CMFDUAL1")
+        assert marker >= 0, "shim-head.bin has no dual-boot support (rebuild boot/lk-modem-diag)"
+        offset = -(-total // ALIGN) * ALIGN
+        struct.pack_into("<Q", shim, marker + 8, offset)
+        tail = bytes(offset - IMAGE_OFFSET - len(image)) + android
+        total = offset + struct.unpack_from("<Q", android, 16)[0]
+        print(f"android kernel at payload +{offset:#x}, {len(android)} bytes")
+    assert total <= KERNEL_AREA, f"payload needs {total:#x}, LK's kernel area is {KERNEL_AREA:#x}"
+    struct.pack_into("<QQ", shim, 16, total, flags)
     shim[DTB_OFFSET:DTB_OFFSET + dtb_size] = dtb
     shim[LK_OFFSET:LK_OFFSET + len(lk)] = lk
-    payload = bytes(shim) + image
+    payload = bytes(shim) + image + tail
+    if a.payload_out:
+        a.payload_out.write_bytes(payload)
+    if not a.out:
+        return
 
     def tool(name, sub):
         for c in (a.aosp_tools / name, a.aosp_tools / sub / name):

@@ -6,10 +6,11 @@ The stock LK bootloader loads `boot_a` (Android boot image header v4) and jumps 
 
 | Offset | Content |
 |---|---|
-| `0x000000` | **shim header** (`boot/prebuilt/shim-head.bin`, 128 bytes): an arm64 Image header whose code loads `x0` with the embedded DTB and jumps to `+2 MiB` |
+| `0x000000` | **shim header** (`boot/prebuilt/shim-head.bin`, 216 bytes): an arm64 Image header whose code calls the helper, loads `x0` with the embedded DTB and jumps to `+2 MiB`. With an Android kernel embedded (see below) it first checks Volume Down |
 | `0x001000` | our **DTB** (must end before `0x10000`) |
 | `0x010000` | **LK modem-record helper** (`boot/prebuilt/lk-modem.bin`, 10.6 KB; source in `boot/lk-modem-diag/`). It finds the modem record LK prepared and forwards it into our DTB (`/soc@0/mddriver@d180000`), so the CCCI driver can take over the modem LK already loaded. It also copies LK's `/memory` ranges into our DTB, so 6 GB and 8 GB phones both boot with their real RAM size; `/proc/device-tree/chosen/cmf,lk-memory` reads `lk` when that worked (otherwise the reason the built-in 8 GiB node was kept). The helper runs with the MMU off, so it is built with `-mstrict-align` |
 | `0x200000` | the kernel **Image** (with its built-in initramfs) |
+| next 2 MiB boundary | optional: the **Android kernel** for dual boot |
 
 It then runs AOSP `mkbootimg` (header v4) and `avbtool add_hash_footer` for the 64 MiB partition, signed with your key.
 
@@ -32,14 +33,24 @@ We checked this builder against the image running on our phone: from the same Im
 
 `--profile profile.tar.gz` appends a "boot profile" at 32 MiB inside the image (header `CMF_BOOT_PROFILE_V1`, size, SHA-256). The old Kali-era chain used it to carry Wi-Fi modules, credentials and a dropbear SSH key, read by `initramfs/rootfs/cmf/autostart.sh`. Since the native systemd boot (Stage 91), **it is not needed**: `/init` only falls back to `autostart.sh` when neither the internal root nor the microSD root can boot. Leave it out unless you know you want it, and never publish a profile: it holds secrets.
 
+## Optional: dual boot with Android
+
+`--android-boot boot_a-android.img` embeds the kernel of an Android boot image (LZ4 or gzip, as Android ships it) after Linux. **Linux stays the default.** Powering on with **Volume Down + Power** held until the logo makes the shim jump to the Android kernel with LK's own device tree and the ramdisks LK already loaded from `init_boot_a`/`vendor_boot_a`, so Android boots as from its own image.
+
+- Use the Android boot image that matches your slot-a `init_boot_a`/`vendor_boot_a`, i.e. your own backup of `boot_a` from step 1. Restart Android normally to get back to Linux.
+- Volume Down is GPIO 54 (active low, bit 22 of `0x10005210`). The shim reads it 8 times; any "released" read boots Linux. LK doesn't use that key.
+- It all has to fit LK's kernel area (`0x40000000`–`0x47c80000`, 124.5 MiB); the script checks. Linux + Android is about 70 MiB.
+- Turn off automatic system updates in Android: an OTA installs to slot b and switches to it.
+- `/proc/device-tree/chosen/cmf,boot-key-din` (under Linux) holds the raw register value the shim read.
+
 ## Rebuilding the shim from source (optional)
 
-`boot/fdt_shim.S` + `boot/wrapper.ld` are the shim header source; `boot/lk-modem-diag/` (`build-lk-modem-diag.sh`) builds the modem-record helper. If you rebuild them, compare against the SHA-256 values below before using your own:
+`boot/lk-modem-diag/build-lk-modem-diag.sh KERNEL_SOURCE OUT --control` builds both `shim-head.bin` (the entry code in `lk-modem-diag.S`) and `lk-modem.bin` (the helper). `boot/fdt_shim.S` is the older, helper-less shim, kept for reference. If you rebuild them, compare against the SHA-256 values below before using your own:
 
 | File | SHA-256 |
 |---|---|
-| `boot/prebuilt/shim-head.bin` | `b09eaf1b2655e956ac859edbebb59ac811e8dac1736b088a6b487d3a312fef6d` |
-| `boot/prebuilt/lk-modem.bin` | `b2190d5442b5ef4d3239616308e10a9467f8a4e7e303842e490468a11859a729` |
+| `boot/prebuilt/shim-head.bin` | `2aa98cc36acd609d5b942e1d3c52d4c183e35e6d10c6530956439b15bd384ffc` |
+| `boot/prebuilt/lk-modem.bin` | `ef7c0607623280b5d287d094ea4fb5362f55539cc67dccb63cd3ba0ec5594387` |
 
 ## Flashing (for later steps)
 

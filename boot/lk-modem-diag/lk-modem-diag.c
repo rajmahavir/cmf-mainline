@@ -284,14 +284,30 @@ static const char *copy_memory(const void *source, void *target)
     return "lk";
 }
 
+/*
+ * Boot key: Volume Down is GPIO 54 (active low), input bit 22 of GPIO DIN
+ * bank 1. The raw register is recorded in /chosen/cmf,boot-key-din, so we
+ * can see the pin as LK leaves it before using it to pick an OS.
+ */
+#ifdef CMF_HOST_TEST
+extern volatile uint32_t cmf_test_din;
+#define CMF_GPIO_DIN1 ((uintptr_t)&cmf_test_din)
+#else
+#define CMF_GPIO_DIN1 0x10005210UL
+#endif
+
 void cmf_lk_modem_diag(const void *source, void *target)
 {
+    fdt32_t din = cpu_to_fdt32(*(volatile uint32_t *)CMF_GPIO_DIN1);
+
     cmf_lk_modem_diag_modem(source, target);
     const char *memory = copy_memory(source, target);
     int chosen = fdt_path_offset(target, "/chosen");
 
-    if (chosen >= 0)
+    if (chosen >= 0) {
         fdt_setprop_string(target, chosen, "cmf,lk-memory", memory);
+        fdt_setprop(target, chosen, "cmf,boot-key-din", &din, sizeof(din));
+    }
 }
 
 void cmf_lk_modem_diag_modem(const void *source, void *target)

@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <libfdt.h>
 
+/* build the helper with -DCMF_HOST_TEST: it reads this instead of the GPIO */
+volatile uint32_t cmf_test_din = 0x0043C800;
+
 #define MODEM_PATH "/soc@0/mddriver@d180000"
 #define RECORD_PROPERTY "ccci,modem_info_v2"
 #define CAPACITY (128 * 1024)

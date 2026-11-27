@@ -5,6 +5,7 @@ State on our reference phone (Stage 95c, 27 November 2026): Ubuntu 26.04 + Phosh
 | Component | Status | Notes |
 |---|---|---|
 | Boot | ✅ works | Stock LK (unlocked) → shim → Linux 7.2. Only `boot_a` is flashed. `fastboot boot` is not accepted by LK. |
+| Dual boot with Android | ✅ works | optional: Volume Down + Power at power-on boots Android from the same `boot_a` ([guide step 3](guide/03-boot-image.md)) |
 | USB serial console | ✅ works | CDC ACM gadget, root shell from the initramfs onward and in emergency mode |
 | Display | ✅ works | 1080×2400 AMOLED, native `mediatek-drm` + DSI, display power cycling, backlight |
 | GPU | ✅ works | Mali-G615 MC2, **Panthor** (built in, Mali CSF firmware built into the Image) + Mesa 26.3; Phosh renders with GLES2 |

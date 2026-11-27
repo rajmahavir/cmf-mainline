@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Host test for the RAM copy in lk-modem-diag.c. Build with the helper
- * (-DCMF_MODEM_CONTROL), host libfdt (fdt.c fdt_ro.c fdt_wip.c fdt_rw.c
+ * (-DCMF_MODEM_CONTROL -DCMF_HOST_TEST), host libfdt (fdt.c fdt_ro.c fdt_wip.c fdt_rw.c
  * fdt_addresses.c) and run with the device's DTB:  ./test-lk-memory cmf.dtb
  */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <libfdt.h>
+
+/* build the helper with -DCMF_HOST_TEST: it reads this instead of the GPIO */
+volatile uint32_t cmf_test_din = 0x0043C800;
 
 #define CAPACITY (128 * 1024)
 #define GIB (1024ULL * 1024ULL * 1024ULL)
@@ -77,6 +80,8 @@ static void expect(const void *incoming, const char *status, const fdt32_t *bank
     } else {
         assert(length == 16 && !memcmp(reg, before, 16));   /* built-in node kept */
     }
+    const fdt32_t *key = fdt_getprop(target, chosen, "cmf,boot-key-din", &length);
+    assert(key && length == 4 && fdt32_to_cpu(*key) == cmf_test_din);
     printf("ok  %-28s %d bank(s)\n", status, count);
 }
 
