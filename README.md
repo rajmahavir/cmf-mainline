@@ -39,7 +39,7 @@ Missing: camera, sensors (accelerometer, proximity, light), fingerprint, NFC, RT
 
 ## Build it yourself
 
-Everything here is built from source. No prebuilt images and no vendor firmware are distributed; the few vendor files the phone needs are copied from **your own phone** during the guide.
+Everything here is built from source, and no vendor firmware is distributed; the few vendor files the phone needs are copied from **your own phone** during the guide. To try it without building the kernel, the [releases](https://github.com/rajmahavir/cmf-mainline/releases) have a generic `boot.img` (microSD root only, no vendor files).
 
 1. [Prerequisites, unlocking and backups](docs/guide/01-prepare.md)
 2. [Build the kernel](docs/guide/02-kernel.md)
