@@ -297,10 +297,9 @@ extern volatile uint32_t cmf_test_din;
 #endif
 
 /*
- * Display (diagnostic for a boot menu): LK leaves its video-mode pipeline
- * scanning OVL0_2L layer 0 out of a RAM framebuffer. Record the layer
- * registers and LK's videolfb properties in /chosen, and draw a magenta box
- * (the same colour in RGB or BGR order) if the registers look sane.
+ * Display: LK leaves its video-mode pipeline scanning OVL0_2L out of a RAM
+ * framebuffer (boot-menu.c draws there). Record the layer registers and LK's
+ * videolfb properties in /chosen for diagnosis.
  */
 #ifdef CMF_HOST_TEST
 extern volatile uint32_t cmf_test_ovl[0x1000 / 4];
@@ -342,23 +341,6 @@ static void display_diag(const void *source, void *target, int chosen)
         }
     }
 
-    uint32_t size = ovl[0x038 / 4], pitch = ovl[0x044 / 4] & 0xffff;
-    uintptr_t addr = ovl[0xf40 / 4];
-    uint32_t width = size & 0xffff, height = size >> 16;
-    const char *drawn = "no:registers";
-
-    if (width == 1080 && height == 2400 && pitch >= width * 4 && pitch <= 8192 &&
-        !(pitch & 3) && addr >= 0x40000000UL && !(addr & 0xfff) &&
-        ram_available(target, addr) >= (uint64_t)pitch * height) {
-        for (uint32_t y = 300; y < 500; y++) {
-            volatile uint32_t *row = (volatile uint32_t *)(addr + y * pitch);
-
-            for (uint32_t x = 100; x < 300; x++)
-                row[x] = 0xffff00ffU;
-        }
-        drawn = "yes";
-    }
-    fdt_setprop_string(target, chosen, "cmf,lk-fb-drawn", drawn);
 }
 
 void cmf_lk_modem_diag(const void *source, void *target)

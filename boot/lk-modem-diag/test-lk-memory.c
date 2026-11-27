@@ -78,8 +78,6 @@ static void expect(const void *incoming, const char *status, const fdt32_t *bank
         assert(length == 16 * count && !memcmp(reg, banks, length));
         const fdt32_t *raw = fdt_getprop(target, chosen, "cmf,lk-memory-reg", &length);
         assert(raw && length == 16 * count && !memcmp(raw, banks, length));
-        const char *drawn = fdt_getprop(target, chosen, "cmf,lk-fb-drawn", &length);
-        assert(drawn && !strcmp(drawn, "no:registers"));
         assert(fdt_getprop(target, chosen, "cmf,lk-ovl", &length) && length == 44);
     } else {
         assert(length == 16 && !memcmp(reg, before, 16));   /* built-in node kept */

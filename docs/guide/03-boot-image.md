@@ -8,7 +8,7 @@ The stock LK bootloader loads `boot_a` (Android boot image header v4) and jumps 
 |---|---|
 | `0x000000` | **shim header** (`boot/prebuilt/shim-head.bin`, 208 bytes): an arm64 Image header whose code calls the helper, loads `x0` with the embedded DTB and jumps to `+2 MiB`. With an Android kernel embedded (see below) it first runs the boot menu |
 | `0x001000` | our **DTB** (must end before `0x10000`) |
-| `0x010000` | **LK modem-record helper** (`boot/prebuilt/lk-modem.bin`, 14.7 KB, with the boot menu; source in `boot/lk-modem-diag/`). It finds the modem record LK prepared and forwards it into our DTB (`/soc@0/mddriver@d180000`), so the CCCI driver can take over the modem LK already loaded. It also copies LK's `/memory` ranges into our DTB, so 6 GB and 8 GB phones both boot with their real RAM size; `/proc/device-tree/chosen/cmf,lk-memory` reads `lk` when that worked (otherwise the reason the built-in 8 GiB node was kept). The helper runs with the MMU off, so it is built with `-mstrict-align` |
+| `0x010000` | **LK modem-record helper** (`boot/prebuilt/lk-modem.bin`, 14.4 KB, with the boot menu; source in `boot/lk-modem-diag/`). It finds the modem record LK prepared and forwards it into our DTB (`/soc@0/mddriver@d180000`), so the CCCI driver can take over the modem LK already loaded. It also copies LK's `/memory` ranges into our DTB, so 6 GB and 8 GB phones both boot with their real RAM size; `/proc/device-tree/chosen/cmf,lk-memory` reads `lk` when that worked (otherwise the reason the built-in 8 GiB node was kept). The helper runs with the MMU off, so it is built with `-mstrict-align` |
 | `0x200000` | the kernel **Image** (with its built-in initramfs) |
 | next 2 MiB boundary | optional: the **Android kernel** for dual boot |
 
@@ -61,8 +61,8 @@ The menu (`boot/lk-modem-diag/boot-menu.c`) runs before either kernel, with the 
 
 | File | SHA-256 |
 |---|---|
-| `boot/prebuilt/shim-head.bin` | `bcb93cb15ea3b6e586c1496cb3dd20822aee3a153f3b540659ec3d90c8ad3d60` |
-| `boot/prebuilt/lk-modem.bin` | `b7f56a0ec425f728c608f697e3330100497bb86dd4c89da3701bb7f3b59c75b7` |
+| `boot/prebuilt/shim-head.bin` | `7eb5edc641d34f5f63d4dce5b90401e85ddbdd8b2b175b5e777c0b5eb54a3716` |
+| `boot/prebuilt/lk-modem.bin` | `6f09bc40cbd8c9963147175838092981be5fff0b6b161df4ea97e4d2f7e3eef7` |
 
 ## Flashing (for later steps)
 
