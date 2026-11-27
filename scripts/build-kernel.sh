@@ -15,9 +15,15 @@
 # Built-in firmware (CONFIG_EXTRA_FIRMWARE) is read from $FIRMWARE_DIR
 # (default WORKDIR/firmware):
 #   arm/mali/arch11.8/mali_csffw.bin  from linux-firmware (GPU, Panthor)
-#   cmf/aw882xx_acf.bin               from YOUR phone's vendor partition
-#                                     (speaker amplifier tuning; see
-#                                     docs/guide/02-kernel.md)
+#   cmf/aw882xx_acf.bin               optional, from YOUR phone's vendor
+#                                     partition (speaker amplifier tuning; see
+#                                     docs/guide/02-kernel.md). Without it the
+#                                     driver loads /lib/firmware/cmf/
+#                                     aw882xx_acf.bin from the rootfs once it
+#                                     is mounted (patch 0014).
+#
+# KBUILD_BUILD_USER/HOST default to "cmf"/"cmf-mainline" so your user and host
+# names don't end up in the Image.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -82,11 +88,17 @@ fi
 
 # 3. Build
 FIRMWARE_DIR=$(realpath "${FIRMWARE_DIR:-$WORK/firmware}")
-for f in arm/mali/arch11.8/mali_csffw.bin cmf/aw882xx_acf.bin; do
-    [ -s "$FIRMWARE_DIR/$f" ] || { echo "missing firmware $FIRMWARE_DIR/$f (see docs/guide/02-kernel.md)"; exit 1; }
-done
+FIRMWARE=arm/mali/arch11.8/mali_csffw.bin
+[ -s "$FIRMWARE_DIR/$FIRMWARE" ] || { echo "missing firmware $FIRMWARE_DIR/$FIRMWARE (see docs/guide/02-kernel.md)"; exit 1; }
+if [ -s "$FIRMWARE_DIR/cmf/aw882xx_acf.bin" ]; then
+    FIRMWARE="$FIRMWARE cmf/aw882xx_acf.bin"
+else
+    echo "note: no cmf/aw882xx_acf.bin; the speaker needs it in the rootfs /lib/firmware"
+fi
+export KBUILD_BUILD_USER=${KBUILD_BUILD_USER:-cmf} KBUILD_BUILD_HOST=${KBUILD_BUILD_HOST:-cmf-mainline}
 mkdir -p out
 sed -e "s|^CONFIG_INITRAMFS_SOURCE=.*|CONFIG_INITRAMFS_SOURCE=\"$WORK/initramfs.list\"|" \
+    -e "s|^CONFIG_EXTRA_FIRMWARE=.*|CONFIG_EXTRA_FIRMWARE=\"$FIRMWARE\"|" \
     -e "s|^CONFIG_EXTRA_FIRMWARE_DIR=.*|CONFIG_EXTRA_FIRMWARE_DIR=\"$FIRMWARE_DIR\"|" \
     "$REPO/kernel/config-7.2.0-cmf" > out/.config
 make -C linux O="$WORK/out" ARCH=arm64 LLVM=1 LOCALVERSION=+ olddefconfig

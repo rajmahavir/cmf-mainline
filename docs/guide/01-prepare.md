@@ -58,7 +58,7 @@ Copy these from your own phone now (they are proprietary and not in this reposit
 
 | File | From | Used by |
 |---|---|---|
-| `aw882xx_acf.bin` | `/vendor/firmware/` | speaker amplifier tuning, built into the kernel (step 2) |
+| `aw882xx_acf.bin` | `/vendor/firmware/` | speaker amplifier tuning: built into the kernel (step 2), or installed in the rootfs as `/lib/firmware/cmf/aw882xx_acf.bin` |
 | Wi-Fi/BT firmware: `soc7_0_ram_mcu_1_1_hdr.bin`, `soc7_0_ram_mcu_1a_1_hdr.bin`, `soc7_0_ram_mcu_1b_1_hdr.bin`, `soc7_0_ram_bt_1_1_hdr.bin`, `soc7_0_ram_bt_1a_1_hdr.bin`, `soc7_0_ram_bt_1b_1_hdr.bin`, `BT_FW.cfg`, `wifi.cfg`, `conninfra.cfg`, `connfem.cfg` | `/vendor/firmware/` | `cmf-wifi-calibrate` (step 4) |
 | Wi-Fi NVRAM (6146 bytes), installed as `cmf-wifi-nvram.bin` | `/mnt/vendor/nvdata/APCFG/APRDEB/WIFI` | Wi-Fi calibration (step 4) |
 | Kinibi TEE binaries (optional) | `/vendor/bin/mcDriverDaemon`, `/vendor/app/mcRegistry/` | `cmf-kinibi` (optional) |
@@ -86,7 +86,7 @@ host$ sudo dpkg --add-architecture arm64 && sudo apt update
 host$ apt download busybox-static:arm64 && dpkg-deb -x busybox-static_*_arm64.deb bb
 host$ export BUSYBOX=$PWD/bb/bin/busybox
 ```
-(Any static arm64 busybox with `switch_root`, `losetup`, `blockdev` and `mount` works, for example Magisk's.)
+(Any static arm64 busybox with `switch_root`, `losetup`, `blockdev` and `mount` works; Ubuntu's 1.37 is what the release image uses.)
 
 AOSP boot tools (for step 3):
 ```bash

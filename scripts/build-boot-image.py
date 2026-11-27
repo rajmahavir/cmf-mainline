@@ -23,9 +23,11 @@ DIR must contain mkbootimg.py and avbtool.py from AOSP
 import argparse
 import gzip
 import hashlib
+import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -94,8 +96,13 @@ def main():
             assert not any(f.read(PROFILE_HEADER + len(profile))), "profile area not empty"
             f.seek(PROFILE_OFFSET)
             f.write(hdr + profile)
-    subprocess.run([py, avbtool, "verify_image", "--image", a.out,
-                    "--key", a.key], check=True)
+    # avbtool verify_image looks for "<partition>.img" next to the image, so
+    # verify a copy named boot.img in a temporary directory.
+    with tempfile.TemporaryDirectory() as tmp:
+        copy = Path(tmp) / "boot.img"
+        shutil.copyfile(a.out, copy)
+        subprocess.run([py, avbtool, "verify_image", "--image", copy,
+                        "--key", a.key], check=True)
     print(f"{a.out}: sha256 {hashlib.sha256(a.out.read_bytes()).hexdigest()}")
 
 

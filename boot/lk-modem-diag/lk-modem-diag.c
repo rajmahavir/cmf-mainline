@@ -188,7 +188,113 @@ static bool enable_control(void *target, const uint8_t *record)
 }
 #endif
 
+/*
+ * RAM size: the shim replaces LK's device tree with ours, and ours has a fixed
+ * memory node (8 GiB). Copy LK's /memory ranges instead, so the 6 GB model
+ * (and any other layout) boots with the RAM it really has. The embedded DTB
+ * may grow up to the helper code at 0x10000. The outcome is recorded in
+ * /chosen/cmf,lk-memory ("lk" or the reason the built-in node was kept) and the
+ * raw ranges LK passed in /chosen/cmf,lk-memory-reg.
+ */
+void cmf_lk_modem_diag_modem(const void *source, void *target);
+
+#define DTB_ROOM (0x10000U - 0x1000U)
+#define MAX_BANKS 8
+#define GIB (1024ULL * 1024ULL * 1024ULL)
+
+static bool source_usable(const void *source, const void *target)
+{
+    uintptr_t address = (uintptr_t)source;
+    uint64_t available = ram_available(target, address);
+
+    return !(address & 7) && available >= sizeof(struct fdt_header) &&
+           !fdt_check_header(source) && fdt_totalsize(source) <= FDT_LIMIT &&
+           fdt_totalsize(source) <= available;
+}
+
+static int memory_node(const void *tree)
+{
+    int node;
+
+    fdt_for_each_subnode(node, tree, 0) {
+        int length;
+        const char *type = fdt_getprop(tree, node, "device_type", &length);
+
+        if (length == sizeof("memory") && !memcmp(type, "memory", length))
+            return node;
+    }
+    return -1;
+}
+
+/* Returns the number of banks copied into out (4 cells each), or -1. */
+static int lk_memory(const void *source, fdt32_t *out, uint64_t *total)
+{
+    int node, count = 0;
+
+    *total = 0;
+    if (fdt_address_cells(source, 0) != 2 || fdt_size_cells(source, 0) != 2)
+        return -1;
+    fdt_for_each_subnode(node, source, 0) {
+        int length;
+        const char *type = fdt_getprop(source, node, "device_type", &length);
+
+        if (length != sizeof("memory") || memcmp(type, "memory", length))
+            continue;
+        const fdt32_t *reg = fdt_getprop(source, node, "reg", &length);
+
+        if (!reg || length % 16)
+            return -1;
+        for (int i = 0; i < length; i += 16, reg += 4) {
+            uint64_t base = read_be64(reg), size = read_be64(reg + 2);
+
+            if (!size)
+                continue;
+            if (count == MAX_BANKS || base < 0x40000000ULL || (base | size) & 0xfff ||
+                base + size < base)
+                return -1;
+            memcpy(out + 4 * count, reg, 16);
+            *total += size;
+            count++;
+        }
+    }
+    return count;
+}
+
+static const char *copy_memory(const void *source, void *target)
+{
+    fdt32_t banks[4 * MAX_BANKS];
+    uint64_t total;
+    int count, chosen, node;
+
+    if (fdt_open_into(target, target, DTB_ROOM))
+        return "kept:dtb-no-room";
+    if (!source_usable(source, target))
+        return "kept:lk-fdt-unusable";
+    count = lk_memory(source, banks, &total);
+    chosen = fdt_path_offset(target, "/chosen");
+    if (count > 0 && chosen >= 0)
+        fdt_setprop(target, chosen, "cmf,lk-memory-reg", banks, 16 * count);
+    if (count <= 0)
+        return "kept:lk-memory-missing";
+    if (total < 2 * GIB || total > 16 * GIB)
+        return "kept:lk-memory-implausible";
+    node = memory_node(target);
+    if (node < 0 || fdt_setprop(target, node, "reg", banks, 16 * count))
+        return "kept:dtb-memory-node";
+    return "lk";
+}
+
 void cmf_lk_modem_diag(const void *source, void *target)
+{
+    cmf_lk_modem_diag_modem(source, target);
+    const char *memory = copy_memory(source, target);
+    int chosen = fdt_path_offset(target, "/chosen");
+
+    if (chosen >= 0)
+        fdt_setprop_string(target, chosen, "cmf,lk-memory", memory);
+}
+
+void cmf_lk_modem_diag_modem(const void *source, void *target)
 {
     int chosen = fdt_path_offset(target, "/chosen");
     char result[RESULT_SIZE] = { 0 };

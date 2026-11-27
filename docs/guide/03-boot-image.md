@@ -8,7 +8,7 @@ The stock LK bootloader loads `boot_a` (Android boot image header v4) and jumps 
 |---|---|
 | `0x000000` | **shim header** (`boot/prebuilt/shim-head.bin`, 128 bytes): an arm64 Image header whose code loads `x0` with the embedded DTB and jumps to `+2 MiB` |
 | `0x001000` | our **DTB** (must end before `0x10000`) |
-| `0x010000` | **LK modem-record helper** (`boot/prebuilt/lk-modem.bin`, 6.8 KB; source in `boot/lk-modem-diag/`). It finds the modem record LK prepared and forwards it into our DTB (`/soc@0/mddriver@d180000`), so the CCCI driver can take over the modem LK already loaded |
+| `0x010000` | **LK modem-record helper** (`boot/prebuilt/lk-modem.bin`, 10.6 KB; source in `boot/lk-modem-diag/`). It finds the modem record LK prepared and forwards it into our DTB (`/soc@0/mddriver@d180000`), so the CCCI driver can take over the modem LK already loaded. It also copies LK's `/memory` ranges into our DTB, so 6 GB and 8 GB phones both boot with their real RAM size; `/proc/device-tree/chosen/cmf,lk-memory` reads `lk` when that worked (otherwise the reason the built-in 8 GiB node was kept). The helper runs with the MMU off, so it is built with `-mstrict-align` |
 | `0x200000` | the kernel **Image** (with its built-in initramfs) |
 
 It then runs AOSP `mkbootimg` (header v4) and `avbtool add_hash_footer` for the 64 MiB partition, signed with your key.
@@ -38,8 +38,8 @@ We checked this builder against the image running on our phone: from the same Im
 
 | File | SHA-256 |
 |---|---|
-| `boot/prebuilt/shim-head.bin` | `f9d0dd1b2c4654fa80af551293a08c6e98904b89f91ca04785b65d949b822d48` |
-| `boot/prebuilt/lk-modem.bin` | `bb9a6a173a6b7d068ded7972ab8c7cf365151a12572842002128655199d487b7` |
+| `boot/prebuilt/shim-head.bin` | `b09eaf1b2655e956ac859edbebb59ac811e8dac1736b088a6b487d3a312fef6d` |
+| `boot/prebuilt/lk-modem.bin` | `b2190d5442b5ef4d3239616308e10a9467f8a4e7e303842e490468a11859a729` |
 
 ## Flashing (for later steps)
 

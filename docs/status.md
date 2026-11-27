@@ -40,10 +40,11 @@ State on our reference phone (Stage 95c, 27 November 2026): Ubuntu 26.04 + Phosh
 | Display / touch | Samsung `s6e8fc3x02` AMOLED, FocalTech FT3519 |
 | Bootloader | LK from an Android 16 Nothing OS build |
 
-Other units may differ: the **6 GB** model (India only) needs a different memory size in the device tree (the DTB currently describes 8 GiB), and phones with another display panel, touch controller or bootloader version are untested.
+Other units may differ. The **6 GB** model (India only) should work: the boot shim copies the RAM layout LK reports into the device tree (tested in QEMU at 3, 6 and 8 GB; on the 8 GB phone it reads `lk`), but no 6 GB phone has run it yet. Phones with another display panel, touch controller or bootloader version are untested.
 
 ## Known problems
 
 - **Rare reset a few seconds after a Power-key screen wake** (seen twice in about two days). Under investigation; stream the crash log ([guide step 8](guide/08-troubleshooting.md)) if you see it.
 - RAM pstore doesn't survive resets on this phone (the bootloader clears it).
+- Don't unbind and rebind the sound card (`/sys/bus/platform/drivers/mt6878-cmf`): the rebind oopses (CFI) in `snd_soc_bind_card` and the next reboot hangs. Reboot instead.
 - The connectivity drivers are vendor code with a one-shot probe: if Wi-Fi calibration fails, reboot rather than reloading modules.

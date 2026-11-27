@@ -11,6 +11,21 @@ void *memcpy(void *restrict destination, const void *restrict source, size_t len
     return destination;
 }
 
+void *memmove(void *destination, const void *source, size_t length)
+{
+    unsigned char *out = destination;
+    const unsigned char *in = source;
+
+    if (out < in) {
+        for (size_t i = 0; i < length; i++)
+            out[i] = in[i];
+    } else {
+        for (size_t i = length; i-- > 0;)
+            out[i] = in[i];
+    }
+    return destination;
+}
+
 void *memset(void *destination, int byte, size_t length)
 {
     unsigned char *out = destination;

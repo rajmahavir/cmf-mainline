@@ -160,6 +160,9 @@ internal_prepare() {
     helper=/sbin/cmf-dmarea
     mapper=/dev/mapper/cmf-root
     mkdir -p "$R"
+    # No area table built in (generic image): SD card only. Leave userdata
+    # alone rather than marking it read-only.
+    [ -s "$table" ] || { cmf_log "no internal-root table; SD card only"; return 1; }
     set -- $(userdata_parts)
     i=0
     while [ "$#" -eq 0 ] && [ "$i" -lt 5 ]; do

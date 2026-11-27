@@ -1,6 +1,6 @@
 # 2. Build the kernel
 
-The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) at commit `12f2e9f04` (Linux 7.2 development, 28 Aug 2026) plus the 13 patches in `kernel/patches/`:
+The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) at commit `12f2e9f04` (Linux 7.2 development, 28 Aug 2026) plus the 14 patches in `kernel/patches/`:
 
 | Patch | Area |
 |---|---|
@@ -17,17 +17,20 @@ The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) 
 | 0011 | power: CMF Phone 1 MT6375 battery fuel gauge |
 | 0012 | net/wwan: MediaTek CCCI modem (data, voice) |
 | 0013 | ASoC: MT6878 audio platform and MT6685 codec |
+| 0014 | ASoC: aw88261: load the speaker tuning file late if missing at boot |
 
 ## 2.1 Firmware built into the Image
 
-The config builds two firmware files into the kernel (`CONFIG_EXTRA_FIRMWARE`). Put them under a `firmware/` directory:
+The config builds the GPU firmware into the kernel (`CONFIG_EXTRA_FIRMWARE`), and the speaker amplifier tuning too if you provide it. Put them under a `firmware/` directory:
 
 ```bash
 host$ mkdir -p ~/cmf-build/firmware/arm/mali/arch11.8 ~/cmf-build/firmware/cmf
 # GPU firmware, from upstream linux-firmware:
 host$ curl -Lo ~/cmf-build/firmware/arm/mali/arch11.8/mali_csffw.bin \
       https://gitlab.com/kernel-firmware/linux-firmware/-/raw/main/arm/mali/arch11.8/mali_csffw.bin
-# Speaker amplifier tuning, from YOUR phone (step 1.4):
+# Optional: speaker amplifier tuning, from YOUR phone (step 1.4). Without it the
+# amplifier driver loads /lib/firmware/cmf/aw882xx_acf.bin from the rootfs once
+# it is mounted (patch 0014); the rest of the sound card works anyway.
 host$ tar -xf backup/vendor-files/vendor-firmware.tar -O firmware/aw882xx_acf.bin \
       > ~/cmf-build/firmware/cmf/aw882xx_acf.bin
 ```

@@ -41,6 +41,10 @@ host$ for f in soc7_0_ram_mcu_1_1_hdr.bin soc7_0_ram_mcu_1a_1_hdr.bin soc7_0_ram
         sudo install -m 0644 /tmp/$f ~/cmf-root/lib/firmware/$f
       done
 host$ sudo install -m 0644 backup/vendor-files/WIFI.nvram ~/cmf-root/lib/firmware/cmf-wifi-nvram.bin
+# Speaker amplifier tuning (skip if you built it into your kernel):
+host$ sudo mkdir -p ~/cmf-root/lib/firmware/cmf
+host$ sudo tar -xf backup/vendor-files/vendor-firmware.tar -O firmware/aw882xx_acf.bin > /tmp/aw882xx_acf.bin &&
+      sudo install -m 0644 /tmp/aw882xx_acf.bin ~/cmf-root/lib/firmware/cmf/aw882xx_acf.bin
 ```
 `connfem.cfg` may be empty; that is expected. `regulatory.db` is installed by the `wireless-regdb` package.
 
