@@ -1,0 +1,10 @@
+# CMF 27 Nov 2026: the gen4m Wi-Fi driver logs ~80 lines/s at its default 0x2f.
+# Keep only WARN|ERROR (0x03) for all modules.
+[Unit]
+Description=CMF Wi-Fi driver log level WARN/ERROR
+After=cmf-wifi-calibrate.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c "for i in $(seq 90); do if [ -w /proc/net/wlan/dbgLevel ]; then echo 0xff:0x03 > /proc/net/wlan/dbgLevel; exit 0; fi; sleep 1; done; exit 1"
+[Install]
+WantedBy=multi-user.target

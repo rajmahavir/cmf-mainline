@@ -1,0 +1,584 @@
+From ae833595d2aaaf1d047dc99524253cd9e9476db5 Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:10 +0000
+Subject: [PATCH 07/13] phy: mediatek: mt6878 MIPI DSI PHY
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ drivers/phy/mediatek/Makefile                 |   1 +
+ .../phy/mediatek/phy-mtk-mipi-dsi-mt6878.c    | 414 ++++++++++++++++++
+ drivers/phy/mediatek/phy-mtk-mipi-dsi.c       |  46 +-
+ drivers/phy/mediatek/phy-mtk-mipi-dsi.h       |  10 +
+ 4 files changed, 469 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6878.c
+
+diff --git a/drivers/phy/mediatek/Makefile b/drivers/phy/mediatek/Makefile
+index 1b8088df7..97b50afbd 100644
+--- a/drivers/phy/mediatek/Makefile
++++ b/drivers/phy/mediatek/Makefile
+@@ -21,4 +21,5 @@ obj-$(CONFIG_PHY_MTK_MIPI_CSI_0_5)	+= phy-mtk-mipi-csi-0-5.o
+ phy-mtk-mipi-dsi-drv-y			:= phy-mtk-mipi-dsi.o
+ phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt8173.o
+ phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt8183.o
++phy-mtk-mipi-dsi-drv-y			+= phy-mtk-mipi-dsi-mt6878.o
+ obj-$(CONFIG_PHY_MTK_MIPI_DSI)		+= phy-mtk-mipi-dsi-drv.o
+diff --git a/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6878.c b/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6878.c
+new file mode 100644
+index 000000000..fc3351860
+--- /dev/null
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi-mt6878.c
+@@ -0,0 +1,414 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * MT6878 D-PHY support derived from MediaTek's N4 MIPI-TX implementation.
++ * Copyright (c) 2021 MediaTek Inc.
++ */
++
++#include <linux/math64.h>
++#include <linux/of_platform.h>
++#include <linux/soc/mediatek/mtk-mmsys.h>
++
++#include "phy-mtk-io.h"
++#include "phy-mtk-mipi-dsi.h"
++
++#define MIPITX_LANE_CON		0x0004
++#define MIPITX_VOLTAGE_SEL	0x0008
++#define RG_DSI_PRD_REF_SEL	GENMASK(5, 0)
++#define RG_DSI_HSTX_LDO_REF_SEL	GENMASK(9, 6)
++#define MIPITX_PRESERVED		0x000c
++#define MIPITX_PLL_PWR		0x0028
++#define AD_DSI_PLL_SDM_PWR_ON	BIT(0)
++#define AD_DSI_PLL_SDM_ISO_EN	BIT(1)
++#define MIPITX_PLL_CON0		0x002c
++#define MIPITX_PLL_CON1		0x0030
++#define RG_DSI_PLL_EN		BIT(0)
++#define RG_DSI_PLL_POSDIV	GENMASK(10, 8)
++#define RG_DSI_PLL_FBSEL		BIT(13)
++#define RG_DSI_PLL_DIV3_EN	BIT(28)
++#define MIPITX_PLL_CON4		0x003c
++#define MIPITX_SW_CTRL_CON4	0x0050
++#define DSI_SW_CTL_EN		BIT(0)
++
++/* The DSI host still owns powered MMSYS routing; the PHY owns its pad controls. */
++static const u16 mt6878_lane_sw_ctl[] = { 0x025c, 0x045c, 0x015c, 0x055c, 0x035c };
++
++/* Vendor lane order: D2, D0, CK0, D1, D3, CK1 (bank 0x600 is skipped). */
++static const u16 mt6878_impedance_banks[] = { 0x100, 0x200, 0x300, 0x400, 0x500, 0x700 };
++static const u16 mt6878_impedance_offsets[] = { 0x00, 0x08, 0xc4, 0xc8 };
++
++struct mt6878_mipitx {
++	struct device *mmsys;
++	bool mmsys_held;
++	u32 impedance[ARRAY_SIZE(mt6878_impedance_banks)]
++		     [ARRAY_SIZE(mt6878_impedance_offsets)];
++	bool impedance_saved;
++	bool configured;
++	bool powered;
++	bool released;
++};
++
++/* Vendor ordering: D2/D2C, D0/D0C, CK/CKC, D1/D1C, D3/D3C. */
++static const u16 mt6878_pre_oe[] = {
++	0x160, 0x180, 0x260, 0x280, 0x360, 0x380, 0x460, 0x480, 0x560, 0x580,
++};
++static const u16 mt6878_data_lanes[] = { 0x100, 0x200, 0x300, 0x400, 0x500 };
++
++static void mt6878_mipi_tx_pre_oe(struct mtk_mipi_tx *tx, bool enable)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(mt6878_pre_oe); i++)
++		mtk_phy_update_bits(tx->regs + mt6878_pre_oe[i], BIT(0), enable ? BIT(0) : 0);
++}
++
++static void mt6878_mipi_tx_sw_control(struct mtk_mipi_tx *tx, bool enable)
++{
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(mt6878_lane_sw_ctl); i++)
++		writel(enable ? BIT(0) | BIT(8) : 0, tx->regs + mt6878_lane_sw_ctl[i]);
++}
++
++static void mt6878_mipi_tx_hold_lanes(struct mtk_mipi_tx *tx)
++{
++	unsigned int i;
++
++	mt6878_mipi_tx_pre_oe(tx, false);
++	/* Output enables include the companion clock paths; DP/DN use primary lanes. */
++	for (i = 0; i < ARRAY_SIZE(mt6878_pre_oe); i++)
++		writel(0, tx->regs + mt6878_pre_oe[i] + 4);
++	for (i = 0; i < ARRAY_SIZE(mt6878_data_lanes); i++)
++		writel(0, tx->regs + mt6878_data_lanes[i] + 0x68);
++	for (i = 0; i < ARRAY_SIZE(mt6878_data_lanes); i++)
++		writel(0, tx->regs + mt6878_data_lanes[i] + 0x6c);
++	mt6878_mipi_tx_sw_control(tx, true);
++}
++
++static int mt6878_mipi_tx_configure(struct phy *phy, union phy_configure_opts *opts)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = tx->priv;
++
++	if (priv->powered)
++		return -EBUSY;
++	if (!priv->mmsys)
++		return -ENODEV;
++	if (!opts || opts->mipi_dphy.lanes != 4 ||
++	    opts->mipi_dphy.hs_clk_rate != 1140000000 ||
++	    tx->data_rate != opts->mipi_dphy.hs_clk_rate)
++		return -EOPNOTSUPP;
++	/* Host owns TIMECON values; only the fixed rate/lane contract is consumed. */
++	priv->configured = true;
++	return 0;
++}
++
++static int mt6878_mipi_tx_calibrate(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = tx->priv;
++
++	if (!priv->configured || !priv->powered)
++		return -EINVAL;
++	if (priv->released)
++		return 0;
++	/* Host reset/sleep registers are ready; restore pad controls after that reset. */
++	mt6878_mipi_tx_pre_oe(tx, true);
++	mt6878_mipi_tx_sw_control(tx, false);
++	priv->released = true;
++	return 0;
++}
++
++static int mt6878_mipi_tx_exit(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = tx->priv;
++
++	if (priv->powered)
++		return -EBUSY;
++	priv->configured = false;
++	priv->released = false;
++	return 0;
++}
++
++static int mt6878_mipi_tx_pll_params(unsigned long rate, u32 *pcw, u32 *posdiv)
++{
++	u32 rate_khz;
++	u32 txdiv;
++
++	/* Match the vendor kHz interface, including its half-kHz truncation. */
++	if (rate < 125000000 || rate > U32_MAX)
++		return -EINVAL;
++
++	rate_khz = rate / 1000;
++	if (rate_khz >= 2000000)
++		*posdiv = 0;
++	else if (rate_khz >= 1000000)
++		*posdiv = 1;
++	else if (rate_khz >= 500000)
++		*posdiv = 2;
++	else if (rate_khz >= 250000)
++		*posdiv = 3;
++	else
++		*posdiv = 4;
++
++	txdiv = 1 << *posdiv;
++	*pcw = div_u64(((u64)(rate_khz >> 1) * txdiv) << 24, 26000);
++
++	return 0;
++}
++
++static void mt6878_mipi_tx_save_impedance(struct mtk_mipi_tx *mipi_tx)
++{
++	struct mt6878_mipitx *priv = mipi_tx->priv;
++	unsigned int lane, reg;
++
++	for (lane = 0; lane < ARRAY_SIZE(mt6878_impedance_banks); lane++)
++		for (reg = 0; reg < ARRAY_SIZE(mt6878_impedance_offsets); reg++)
++			priv->impedance[lane][reg] = readl(mipi_tx->regs +
++				mt6878_impedance_banks[lane] + mt6878_impedance_offsets[reg]);
++	priv->impedance_saved = true;
++}
++
++static int mt6878_mipi_tx_pll_prepare(struct clk_hw *hw)
++{
++	struct mtk_mipi_tx *mipi_tx = mtk_mipi_tx_from_clk_hw(hw);
++	struct mt6878_mipitx *priv = mipi_tx->priv;
++	void __iomem *base = mipi_tx->regs;
++	u32 pcw, posdiv;
++	unsigned int i;
++	int ret;
++
++	if (priv->configured && !priv->mmsys_held)
++		return -EACCES;
++
++	/* The N4 coefficients below are defined for a 26 MHz reference. */
++	if (clk_hw_get_rate(clk_hw_get_parent(hw)) != 26000000)
++		return -EINVAL;
++
++	ret = mt6878_mipi_tx_pll_params(mipi_tx->data_rate, &pcw, &posdiv);
++	if (ret)
++		return ret;
++
++	/* PHY core powers the domain before PLL prepare. Identity mapping only. */
++	if (priv->configured) {
++		mtk_phy_update_bits(base + 0x320, BIT(0), BIT(0));
++		mtk_phy_update_bits(base + 0x040, GENMASK(6, 4), 0);
++		mtk_phy_update_bits(base + 0x040, GENMASK(10, 8), 5 << 8);
++	}
++
++	/* Called with the PHY supply domain on; never read these at probe. */
++	if (!priv->impedance_saved)
++		mt6878_mipi_tx_save_impedance(mipi_tx);
++
++	mtk_phy_update_field(base + MIPITX_VOLTAGE_SEL, RG_DSI_PRD_REF_SEL,
++			     mipi_tx->data_rate < 2500000000U ? 0 : 4);
++	mtk_phy_update_field(base + MIPITX_VOLTAGE_SEL, RG_DSI_HSTX_LDO_REF_SEL, 7);
++	writel(mipi_tx->data_rate < 2500000000U ? 0xffff00f0 : 0xffff0030,
++	       base + MIPITX_PRESERVED);
++	writel(0x00ff12e0, base + MIPITX_PLL_CON4);
++	writel(0x3fff0180, base + MIPITX_LANE_CON);
++	usleep_range(500, 600);
++	writel(0x3fff00c0, base + MIPITX_LANE_CON);
++
++	for (i = 0; i < ARRAY_SIZE(mt6878_lane_sw_ctl); i++)
++		mtk_phy_set_bits(base + mt6878_lane_sw_ctl[i], DSI_SW_CTL_EN);
++
++	mtk_phy_set_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_PWR_ON);
++	usleep_range(30, 100);
++	mtk_phy_clear_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_ISO_EN);
++	mtk_phy_clear_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_FBSEL);
++	writel(pcw, base + MIPITX_PLL_CON0);
++	mtk_phy_update_field(base + MIPITX_PLL_CON1, RG_DSI_PLL_POSDIV, posdiv);
++	mtk_phy_clear_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_DIV3_EN);
++	mtk_phy_set_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
++	usleep_range(50, 100);
++
++	return 0;
++}
++
++static void mt6878_mipi_tx_pll_unprepare(struct clk_hw *hw)
++{
++	struct mtk_mipi_tx *mipi_tx = mtk_mipi_tx_from_clk_hw(hw);
++	void __iomem *base = mipi_tx->regs;
++
++	mtk_phy_clear_bits(base + MIPITX_PLL_CON1, RG_DSI_PLL_EN);
++	/* Preserve the vendor sequence; bit 8 semantics need separate review. */
++	mtk_phy_clear_bits(base + MIPITX_SW_CTRL_CON4, BIT(0));
++	mtk_phy_set_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_ISO_EN);
++	mtk_phy_clear_bits(base + MIPITX_PLL_PWR, AD_DSI_PLL_SDM_PWR_ON);
++	writel(0x3fff0180, base + MIPITX_LANE_CON);
++	writel(0x3fff0100, base + MIPITX_LANE_CON);
++}
++
++static int mt6878_mipi_tx_pll_determine_rate(struct clk_hw *hw,
++					 struct clk_rate_request *req)
++{
++	unsigned long min_rate = max(req->min_rate, 125000000UL);
++	unsigned long max_rate = min_t(unsigned long, req->max_rate, U32_MAX);
++	unsigned long rate;
++	u32 pcw, posdiv;
++
++	if (min_rate > max_rate)
++		return -EINVAL;
++
++	/*
++	 * Half of an even kHz rate can be represented by the vendor algorithm.
++	 * 2000 is not a power of two: use rounddown()/roundup(), not the masking
++	 * round_down()/round_up() (Stage 63: 1140 MHz became 1139998720 Hz).
++	 */
++	rate = rounddown(clamp(req->rate, min_rate, max_rate), 2000UL);
++	if (rate < min_rate)
++		rate = roundup(min_rate, 2000UL);
++	if (rate > max_rate)
++		return -EINVAL;
++	req->rate = rate;
++	return mt6878_mipi_tx_pll_params(rate, &pcw, &posdiv);
++}
++
++static int mt6878_mipi_tx_pll_set_rate(struct clk_hw *hw, unsigned long rate,
++				    unsigned long parent_rate)
++{
++	u32 pcw, posdiv;
++	int ret;
++
++	if (parent_rate != 26000000)
++		return -EINVAL;
++	ret = mt6878_mipi_tx_pll_params(rate, &pcw, &posdiv);
++	if (ret)
++		return ret;
++
++	return mtk_mipi_tx_pll_set_rate(hw, rate, parent_rate);
++}
++
++static const struct clk_ops mt6878_mipi_tx_pll_ops = {
++	.prepare = mt6878_mipi_tx_pll_prepare,
++	.unprepare = mt6878_mipi_tx_pll_unprepare,
++	.determine_rate = mt6878_mipi_tx_pll_determine_rate,
++	.set_rate = mt6878_mipi_tx_pll_set_rate,
++	.recalc_rate = mtk_mipi_tx_pll_recalc_rate,
++};
++
++static void mt6878_mipi_tx_enable_signal(struct phy *phy)
++{
++	struct mtk_mipi_tx *mipi_tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = mipi_tx->priv;
++	unsigned int lane, reg;
++
++	/* Restore the firmware trim after power-up, as in the vendor driver. */
++	for (lane = 0; lane < ARRAY_SIZE(mt6878_impedance_banks); lane++)
++		for (reg = 0; reg < ARRAY_SIZE(mt6878_impedance_offsets); reg++)
++			writel(priv->impedance[lane][reg], mipi_tx->regs +
++				mt6878_impedance_banks[lane] + mt6878_impedance_offsets[reg]);
++	if (priv->configured)
++		mt6878_mipi_tx_hold_lanes(mipi_tx);
++	priv->powered = true;
++	priv->released = false;
++}
++
++static void mt6878_mipi_tx_disable_signal(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = tx->priv;
++
++	/* Capture trim and isolate pads while the PHY domain/PLL are still on. */
++	mt6878_mipi_tx_save_impedance(tx);
++	if (priv->configured)
++		mt6878_mipi_tx_hold_lanes(tx);
++	priv->powered = false;
++	priv->released = false;
++}
++
++static int mt6878_mipi_tx_power_on(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = tx->priv;
++	int ret;
++
++	if (priv->configured) {
++		ret = mtk_mmsys_dsi_lane_get(priv->mmsys, 0);
++		if (ret)
++			return ret;
++		priv->mmsys_held = true;
++	}
++
++	ret = clk_prepare_enable(tx->pll_hw.clk);
++	if (ret) {
++		if (priv->mmsys_held) {
++			mtk_mmsys_dsi_lane_put(priv->mmsys);
++			priv->mmsys_held = false;
++		}
++		return ret;
++	}
++	mt6878_mipi_tx_enable_signal(phy);
++	return 0;
++}
++
++static int mt6878_mipi_tx_power_off(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++	struct mt6878_mipitx *priv = tx->priv;
++
++	mt6878_mipi_tx_disable_signal(phy);
++	clk_disable_unprepare(tx->pll_hw.clk);
++	if (priv->mmsys_held) {
++		mtk_mmsys_dsi_lane_put(priv->mmsys);
++		priv->mmsys_held = false;
++	}
++	return 0;
++}
++
++static void mt6878_mipi_tx_put_mmsys(void *data)
++{
++	put_device(data);
++}
++
++static int mt6878_mipi_tx_init(struct mtk_mipi_tx *tx)
++{
++	struct device *dev = tx->dev;
++	struct mt6878_mipitx *priv;
++	struct platform_device *mmsys;
++	struct device_node *node;
++	int ret;
++
++	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
++	if (!priv)
++		return -ENOMEM;
++	tx->priv = priv;
++
++	/* Legacy PLL-only use needs no MMSYS access; configure requires a supplier. */
++	if (!of_property_present(dev->of_node, "mediatek,mmsys"))
++		return 0;
++	node = of_parse_phandle(dev->of_node, "mediatek,mmsys", 0);
++	if (!node)
++		return -EINVAL;
++	if (!of_device_is_compatible(node, "mediatek,mt6878-mmsys0") &&
++	    !of_device_is_compatible(node, "mediatek,mt6878-mmsys0-native")) {
++		of_node_put(node);
++		return -EINVAL;
++	}
++	mmsys = of_find_device_by_node(node);
++	of_node_put(node);
++	if (!mmsys)
++		return -EPROBE_DEFER;
++	ret = devm_add_action_or_reset(dev, mt6878_mipi_tx_put_mmsys, &mmsys->dev);
++	if (ret)
++		return ret;
++	if (!device_is_bound(&mmsys->dev))
++		return -EPROBE_DEFER;
++	if (!device_link_add(dev, &mmsys->dev, DL_FLAG_AUTOREMOVE_CONSUMER))
++		return -EINVAL;
++	priv->mmsys = &mmsys->dev;
++	return 0;
++}
++
++const struct mtk_mipitx_data mt6878_mipitx_data = {
++	.mipi_tx_power_on = mt6878_mipi_tx_power_on,
++	.mipi_tx_power_off = mt6878_mipi_tx_power_off,
++	.mipi_tx_init = mt6878_mipi_tx_init,
++	.mipi_tx_configure = mt6878_mipi_tx_configure,
++	.mipi_tx_calibrate = mt6878_mipi_tx_calibrate,
++	.mipi_tx_exit = mt6878_mipi_tx_exit,
++	.mipi_tx_clk_ops = &mt6878_mipi_tx_pll_ops,
++	.mipi_tx_enable_signal = mt6878_mipi_tx_enable_signal,
++	.mipi_tx_disable_signal = mt6878_mipi_tx_disable_signal,
++};
+diff --git a/drivers/phy/mediatek/phy-mtk-mipi-dsi.c b/drivers/phy/mediatek/phy-mtk-mipi-dsi.c
+index 065ea6260..8dc9c5de0 100644
+--- a/drivers/phy/mediatek/phy-mtk-mipi-dsi.c
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi.c
+@@ -35,6 +35,9 @@ static int mtk_mipi_tx_power_on(struct phy *phy)
+ 	struct mtk_mipi_tx *mipi_tx = phy_get_drvdata(phy);
+ 	int ret;
+ 
++	if (mipi_tx->driver_data->mipi_tx_power_on)
++		return mipi_tx->driver_data->mipi_tx_power_on(phy);
++
+ 	/* Power up core and enable PLL */
+ 	ret = clk_prepare_enable(mipi_tx->pll_hw.clk);
+ 	if (ret < 0)
+@@ -49,6 +52,9 @@ static int mtk_mipi_tx_power_off(struct phy *phy)
+ {
+ 	struct mtk_mipi_tx *mipi_tx = phy_get_drvdata(phy);
+ 
++	if (mipi_tx->driver_data->mipi_tx_power_off)
++		return mipi_tx->driver_data->mipi_tx_power_off(phy);
++
+ 	/* Enable pad tie low, disable DSI Lane LDO outputs */
+ 	mipi_tx->driver_data->mipi_tx_disable_signal(phy);
+ 
+@@ -58,7 +64,37 @@ static int mtk_mipi_tx_power_off(struct phy *phy)
+ 	return 0;
+ }
+ 
++static int mtk_mipi_tx_configure(struct phy *phy, union phy_configure_opts *opts)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++
++	if (!tx->driver_data->mipi_tx_configure)
++		return -EOPNOTSUPP;
++	return tx->driver_data->mipi_tx_configure(phy, opts);
++}
++
++static int mtk_mipi_tx_calibrate(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++
++	if (tx->driver_data->mipi_tx_calibrate)
++		return tx->driver_data->mipi_tx_calibrate(phy);
++	return 0;
++}
++
++static int mtk_mipi_tx_exit(struct phy *phy)
++{
++	struct mtk_mipi_tx *tx = phy_get_drvdata(phy);
++
++	if (tx->driver_data->mipi_tx_exit)
++		return tx->driver_data->mipi_tx_exit(phy);
++	return 0;
++}
++
+ static const struct phy_ops mtk_mipi_tx_ops = {
++	.configure = mtk_mipi_tx_configure,
++	.calibrate = mtk_mipi_tx_calibrate,
++	.exit = mtk_mipi_tx_exit,
+ 	.power_on = mtk_mipi_tx_power_on,
+ 	.power_off = mtk_mipi_tx_power_off,
+ 	.owner = THIS_MODULE,
+@@ -120,6 +156,7 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
+ 	mipi_tx = devm_kzalloc(dev, sizeof(*mipi_tx), GFP_KERNEL);
+ 	if (!mipi_tx)
+ 		return -ENOMEM;
++	mipi_tx->dev = dev;
+ 
+ 	mipi_tx->driver_data = of_device_get_match_data(dev);
+ 	if (!mipi_tx->driver_data)
+@@ -155,6 +192,12 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
+ 	if (ret < 0)
+ 		return dev_err_probe(dev, ret, "Failed to read clock-output-names\n");
+ 
++	if (mipi_tx->driver_data->mipi_tx_init) {
++		ret = mipi_tx->driver_data->mipi_tx_init(mipi_tx);
++		if (ret)
++			return ret;
++	}
++
+ 	clk_init.ops = mipi_tx->driver_data->mipi_tx_clk_ops;
+ 
+ 	mipi_tx->pll_hw.init = &clk_init;
+@@ -172,8 +215,6 @@ static int mtk_mipi_tx_probe(struct platform_device *pdev)
+ 	if (IS_ERR(phy_provider))
+ 		return PTR_ERR(phy_provider);
+ 
+-	mipi_tx->dev = dev;
+-
+ 	mtk_mipi_tx_get_calibration_datal(mipi_tx);
+ 
+ 	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, &mipi_tx->pll_hw);
+@@ -183,6 +224,7 @@ static const struct of_device_id mtk_mipi_tx_match[] = {
+ 	{ .compatible = "mediatek,mt2701-mipi-tx", .data = &mt2701_mipitx_data },
+ 	{ .compatible = "mediatek,mt8173-mipi-tx", .data = &mt8173_mipitx_data },
+ 	{ .compatible = "mediatek,mt8183-mipi-tx", .data = &mt8183_mipitx_data },
++	{ .compatible = "mediatek,mt6878-mipi-tx", .data = &mt6878_mipitx_data },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, mtk_mipi_tx_match);
+diff --git a/drivers/phy/mediatek/phy-mtk-mipi-dsi.h b/drivers/phy/mediatek/phy-mtk-mipi-dsi.h
+index 5d4876f1d..63821d1aa 100644
+--- a/drivers/phy/mediatek/phy-mtk-mipi-dsi.h
++++ b/drivers/phy/mediatek/phy-mtk-mipi-dsi.h
+@@ -16,7 +16,15 @@
+ #include <linux/phy/phy.h>
+ #include <linux/slab.h>
+ 
++struct mtk_mipi_tx;
++
+ struct mtk_mipitx_data {
++	int (*mipi_tx_power_on)(struct phy *phy);
++	int (*mipi_tx_power_off)(struct phy *phy);
++	int (*mipi_tx_init)(struct mtk_mipi_tx *mipi_tx);
++	int (*mipi_tx_configure)(struct phy *phy, union phy_configure_opts *opts);
++	int (*mipi_tx_calibrate)(struct phy *phy);
++	int (*mipi_tx_exit)(struct phy *phy);
+ 	const u32 mppll_preserve;
+ 	const struct clk_ops *mipi_tx_clk_ops;
+ 	void (*mipi_tx_enable_signal)(struct phy *phy);
+@@ -29,6 +37,7 @@ struct mtk_mipi_tx {
+ 	u32 data_rate;
+ 	u32 mipitx_drive;
+ 	u32 rt_code[5];
++	void *priv;
+ 	const struct mtk_mipitx_data *driver_data;
+ 	struct clk_hw pll_hw;
+ };
+@@ -42,5 +51,6 @@ unsigned long mtk_mipi_tx_pll_recalc_rate(struct clk_hw *hw,
+ extern const struct mtk_mipitx_data mt2701_mipitx_data;
+ extern const struct mtk_mipitx_data mt8173_mipitx_data;
+ extern const struct mtk_mipitx_data mt8183_mipitx_data;
++extern const struct mtk_mipitx_data mt6878_mipitx_data;
+ 
+ #endif
+-- 
+2.53.0
+

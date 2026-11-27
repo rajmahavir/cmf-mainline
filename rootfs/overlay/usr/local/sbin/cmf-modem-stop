@@ -1,0 +1,7 @@
+#!/bin/sh
+# ExecStopPost for cmf-modem.service: power the modem down cleanly.
+fsm=/sys/kernel/debug/d180000.mddriver/fsm
+[ -w "$fsm" ] || exit 0
+grep -qx 'state: ready' "$fsm" && echo stop > "$fsm" || :
+umount /run/cmf-modem 2>/dev/null || :
+exit 0

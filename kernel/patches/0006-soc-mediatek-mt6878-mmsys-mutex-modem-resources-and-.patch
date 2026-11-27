@@ -1,0 +1,1226 @@
+From 509fa417eebaf1cfb5ccbd6678fb6448587034cb Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:09 +0000
+Subject: [PATCH 06/13] soc: mediatek: mt6878 mmsys/mutex, modem resources and
+ GPUEB mailbox
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ drivers/mailbox/mtk-gpueb-mailbox.c     |  46 ++++-
+ drivers/soc/mediatek/Kconfig            |   8 +
+ drivers/soc/mediatek/Makefile           |   1 +
+ drivers/soc/mediatek/cmf-md-resources.c | 242 ++++++++++++++++++++++++
+ drivers/soc/mediatek/cmf-md-sequence.h  |  67 +++++++
+ drivers/soc/mediatek/mt6878-mmsys.h     |  61 ++++++
+ drivers/soc/mediatek/mtk-mmsys.c        | 223 +++++++++++++++++++++-
+ drivers/soc/mediatek/mtk-mmsys.h        |   4 +
+ drivers/soc/mediatek/mtk-mutex.c        | 195 ++++++++++++++++++-
+ include/linux/soc/mediatek/mtk-mmsys.h  |  37 ++++
+ 10 files changed, 873 insertions(+), 11 deletions(-)
+ create mode 100644 drivers/soc/mediatek/cmf-md-resources.c
+ create mode 100644 drivers/soc/mediatek/cmf-md-sequence.h
+ create mode 100644 drivers/soc/mediatek/mt6878-mmsys.h
+
+diff --git a/drivers/mailbox/mtk-gpueb-mailbox.c b/drivers/mailbox/mtk-gpueb-mailbox.c
+index f6d2beccd..ac708fd30 100644
+--- a/drivers/mailbox/mtk-gpueb-mailbox.c
++++ b/drivers/mailbox/mtk-gpueb-mailbox.c
+@@ -116,8 +116,14 @@ static irqreturn_t mtk_gpueb_mbox_thread(int irq, void *data)
+ 
+ 		mtk_gpueb_mbox_read_rx(buf, ch);
+ 		writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
+-		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
++		/*
++		 * The data is copied out, so the channel can send again. Do this
++		 * before the client sees the reply: a client that sends its next
++		 * message from there would get -EBUSY, and the mailbox core keeps
++		 * such a message queued without ever retrying it.
++		 */
+ 		atomic_set(&ch->rx_status, 0);
++		mbox_chan_received_data(&ch->ebm->mbox.chans[ch->num], buf);
+ 		return IRQ_HANDLED;
+ 	}
+ 
+@@ -163,8 +169,15 @@ static int mtk_gpueb_mbox_startup(struct mbox_chan *chan)
+ 
+ 	writel(BIT(ch->num), ch->ebm->mbox_ctl + GPUEB_MBOX_CTL_IRQ_CLR);
+ 
++	/*
++	 * NO_SUSPEND: the GPU power domain is switched from the noirq phases
++	 * of system suspend (genpd), and its provider waits for the EB's
++	 * reply through this interrupt. The IRQ thread is not frozen, so the
++	 * reply is delivered with the other device interrupts disabled.
++	 */
+ 	ret = devm_request_threaded_irq(ch->ebm->dev, ch->ebm->irq, mtk_gpueb_mbox_isr,
+-					mtk_gpueb_mbox_thread, IRQF_SHARED | IRQF_ONESHOT,
++					mtk_gpueb_mbox_thread,
++					IRQF_SHARED | IRQF_ONESHOT | IRQF_NO_SUSPEND,
+ 					ch->full_name, ch);
+ 	if (ret) {
+ 		dev_err(ch->ebm->dev, "Failed to request IRQ: %pe\n",
+@@ -224,7 +237,11 @@ static int mtk_gpueb_mbox_probe(struct platform_device *pdev)
+ 	if (ebm->irq < 0)
+ 		return ebm->irq;
+ 
+-	ebm->clk = devm_clk_get_prepared(ebm->dev, NULL);
++	/*
++	 * On some SoCs, such as the MT6878, the GPUEB runs from a PLL of its
++	 * own that the boot firmware sets up, and there is no clock to hold.
++	 */
++	ebm->clk = devm_clk_get_optional_prepared(ebm->dev, NULL);
+ 	if (IS_ERR(ebm->clk))
+ 		return dev_err_probe(ebm->dev, PTR_ERR(ebm->clk),
+ 				     "Failed to get 'eb' clock\n");
+@@ -299,7 +316,30 @@ static const struct mtk_gpueb_mbox_variant mtk_gpueb_mbox_mt8196 = {
+ 	},
+ };
+ 
++/*
++ * MT6878: same controller, one 0x280 byte mailbox. The layout follows the
++ * channel sizes the GPUEB firmware expects: all the outgoing slots first,
++ * then the incoming ones, in channel order.
++ */
++static const struct mtk_gpueb_mbox_variant mtk_gpueb_mbox_mt6878 = {
++	.num_channels = 11,
++	.channels = {
++		{ "fast-dvfs-event", 0, 0x0000, 16, 0x00d8, 16 },
++		{ "gpufreq",         1, 0x0010, 32, 0x00e8, 32 },
++		{ "sleep",           2, 0x0030, 12, 0x0108,  4 },
++		{ "timer",           3, 0x003c, 24, 0x010c,  4 },
++		{ "fhctl",           4, 0x0054, 36, 0x0110,  4 },
++		{ "ccf",             5, 0x0078, 16, 0x0114, 16 },
++		{ "gpumpu",          6, 0x0088, 24, 0x0124,  4 },
++		{ "fast-dvfs",       7, 0x00a0, 24, 0x0128, 24 },
++		{ "ipir-c-met",      8, 0x00b8,  4, 0x0140, 16 },
++		{ "ipis-c-met",      9, 0x00bc, 16, 0x0150,  4 },
++		{ "brisket",        10, 0x00cc, 12, 0x0154, 12 },
++	},
++};
++
+ static const struct of_device_id mtk_gpueb_mbox_of_ids[] = {
++	{ .compatible = "mediatek,mt6878-gpueb-mbox", .data = &mtk_gpueb_mbox_mt6878 },
+ 	{ .compatible = "mediatek,mt8196-gpueb-mbox", .data = &mtk_gpueb_mbox_mt8196 },
+ 	{ /* Sentinel */ }
+ };
+diff --git a/drivers/soc/mediatek/Kconfig b/drivers/soc/mediatek/Kconfig
+index d7293977f..5f1dbc3c2 100644
+--- a/drivers/soc/mediatek/Kconfig
++++ b/drivers/soc/mediatek/Kconfig
+@@ -89,4 +89,12 @@ config MTK_SOCINFO
+ 	  information about the SoC to the userspace including the
+ 	  manufacturer name, marketing name and soc name.
+ 
++config CMF_MD_RESOURCES
++	tristate "CMF Phone MT6878 switchable modem resources"
++	depends on ARCH_MEDIATEK || COMPILE_TEST
++	depends on OF
++	help
++	  Clock, regulator and power sequence provider used by mtk_ccci to
++	  power the MT6878 modem on and off.
++
+ endmenu
+diff --git a/drivers/soc/mediatek/Makefile b/drivers/soc/mediatek/Makefile
+index 0665573e3..5e86b741c 100644
+--- a/drivers/soc/mediatek/Makefile
++++ b/drivers/soc/mediatek/Makefile
+@@ -9,3 +9,4 @@ obj-$(CONFIG_MTK_MMSYS) += mtk-mmsys.o
+ obj-$(CONFIG_MTK_MMSYS) += mtk-mutex.o
+ obj-$(CONFIG_MTK_SVS) += mtk-svs.o
+ obj-$(CONFIG_MTK_SOCINFO) += mtk-socinfo.o
++obj-$(CONFIG_CMF_MD_RESOURCES) += cmf-md-resources.o
+diff --git a/drivers/soc/mediatek/cmf-md-resources.c b/drivers/soc/mediatek/cmf-md-resources.c
+new file mode 100644
+index 000000000..f45889550
+--- /dev/null
++++ b/drivers/soc/mediatek/cmf-md-resources.c
+@@ -0,0 +1,242 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* CMF Phone 1 modem resources inherited from LK. */
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++
++#include "cmf-md-sequence.h"
++
++struct cmf_md_domain {
++	struct generic_pm_domain genpd;
++	struct cmf_md_maps maps;
++	struct task_struct *caller;
++	bool requested_on;
++	int error;
++	struct device *dev;
++};
++
++static int cmf_md_transition(struct generic_pm_domain *genpd, bool on)
++{
++	struct cmf_md_domain *md = container_of(genpd, struct cmf_md_domain, genpd);
++
++	if (READ_ONCE(md->caller) != current || md->requested_on != on)
++		return -EBUSY;
++	if (!md->error) {
++		md->error = cmf_md_switch(&md->maps, on);
++		if (md->error)
++			dev_err(md->dev, "MD power %s failed: %d; reboot to recover\n",
++				on ? "on" : "off", md->error);
++	}
++	return md->error;
++}
++
++static int cmf_md_on(struct generic_pm_domain *genpd)
++{
++	return cmf_md_transition(genpd, true);
++}
++
++static int cmf_md_off(struct generic_pm_domain *genpd)
++{
++	return cmf_md_transition(genpd, false);
++}
++
++/* The caller serializes commands with CCCI's FSM mutex. Only its synchronous
++ * runtime-PM operation may switch MD; probing and genpd idle work cannot.
++ */
++int cmf_md_runtime_switch(struct device *dev, bool on);
++int cmf_md_runtime_switch(struct device *dev, bool on)
++{
++	struct generic_pm_domain *genpd;
++	struct cmf_md_domain *md;
++	unsigned int value;
++	int ret;
++
++	if (!dev->pm_domain)
++		return -ENODEV;
++	genpd = pd_to_genpd(dev->pm_domain);
++	if (genpd->power_off != cmf_md_off)
++		return -ENODEV;
++	md = container_of(genpd, struct cmf_md_domain, genpd);
++	if (md->error)
++		return md->error;
++	md->requested_on = on;
++	WRITE_ONCE(md->caller, current);
++	ret = on ? pm_runtime_resume_and_get(dev) : pm_runtime_put_sync(dev);
++	WRITE_ONCE(md->caller, NULL);
++	if (ret < 0 || md->error)
++		return ret < 0 ? ret : md->error;
++	ret = regmap_read(md->maps.spm, 0xe00, &value);
++	if (!ret && !!(value & BIT(30)) != on)
++		ret = -EIO;
++	if (ret) {
++		md->error = ret;
++		if (on)
++			pm_runtime_put_noidle(dev);
++	}
++	return ret;
++}
++EXPORT_SYMBOL_GPL(cmf_md_runtime_switch);
++
++/* Only the CMF start selectors are valid writes in this trial. */
++static const unsigned int start_sel[] = { 0x70, 0x80, 0x40 };
++
++static int cmf_md_set_voltage_sel(struct regulator_dev *rdev, unsigned int sel)
++{
++	if (sel != start_sel[rdev_get_id(rdev)])
++		return -EINVAL;
++	return regulator_set_voltage_sel_regmap(rdev, sel);
++}
++
++static const struct regulator_ops cmf_md_switchable_rail_ops = {
++	.is_enabled = regulator_is_enabled_regmap,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.list_voltage = regulator_list_voltage_linear,
++	.map_voltage = regulator_map_voltage_linear,
++	.set_voltage_sel = cmf_md_set_voltage_sel,
++};
++
++static const struct regulator_ops cmf_md_rail_ops = {
++	.is_enabled = regulator_is_enabled_regmap,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.list_voltage = regulator_list_voltage_linear,
++};
++
++/* Addresses and linear ranges from CMF's Android MT6363 regulator driver. */
++#define CMF_MD_RAIL(_id, _name, _enreg, _bit, _vsel, _mask, _min, _count) { \
++	.id = _id, .name = _name, .of_match = _name, .owner = THIS_MODULE, \
++	.ops = &cmf_md_rail_ops, .type = REGULATOR_VOLTAGE, \
++	.enable_reg = _enreg, .enable_mask = BIT(_bit), \
++	.vsel_reg = _vsel, .vsel_mask = _mask, \
++	.min_uV = _min, .uV_step = 6250, .n_voltages = _count, \
++}
++
++static const struct regulator_desc rails[] = {
++	CMF_MD_RAIL(0, "vbuck1", 0x240, 1, 0x24d, 0xff, 0, 192),
++	CMF_MD_RAIL(1, "vbuck2", 0x240, 2, 0x24e, 0xff, 0, 192),
++	CMF_MD_RAIL(2, "vsram-modem", 0x243, 6, 0x25a, 0x7f, 400000, 128),
++};
++
++static void cmf_md_remove_domain(void *domain)
++{
++	pm_genpd_remove(domain);
++}
++
++static void cmf_md_remove_provider(void *node)
++{
++	of_genpd_del_provider(node);
++}
++
++static int cmf_md_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct regulator_config config = { .dev = dev };
++	struct cmf_md_domain *md;
++	struct generic_pm_domain *domain;
++	bool switchable = of_device_is_compatible(dev->of_node,
++					"cmf,mt6878-switchable-modem-resources");
++	struct regmap *spm;
++	unsigned int value;
++	int i, ret;
++
++	config.regmap = dev_get_regmap(dev->parent, NULL);
++	if (!config.regmap)
++		return -EPROBE_DEFER;
++
++	ret = regmap_read(config.regmap, 0x000b, &value);
++	if (ret || value != 0x63)
++		return dev_err_probe(dev, ret ?: -ENODEV, "MT6363 chip ID\n");
++
++	spm = syscon_regmap_lookup_by_phandle(dev->of_node, "mediatek,scpsys");
++	if (IS_ERR(spm))
++		return dev_err_probe(dev, PTR_ERR(spm), "SPM regmap\n");
++	ret = regmap_read(spm, 0xe00, &value);
++	if (ret || !(value & BIT(30)))
++		return dev_err_probe(dev, ret ?: -ENODEV, "missing inherited MD power ACK\n");
++
++	/* Check all inherited selectors before regulator core applies constraints. */
++	if (switchable) {
++		for (i = 0; i < ARRAY_SIZE(rails); i++) {
++			ret = regmap_read(config.regmap, rails[i].enable_reg, &value);
++			if (ret || !(value & rails[i].enable_mask))
++				return dev_err_probe(dev, ret ?: -ENODEV, "%s disabled\n", rails[i].name);
++			ret = regmap_read(config.regmap, rails[i].vsel_reg, &value);
++			if (ret || (value & rails[i].vsel_mask) != start_sel[i])
++				return dev_err_probe(dev, ret ?: -ERANGE, "%s selector\n", rails[i].name);
++		}
++	}
++
++	for (i = 0; i < ARRAY_SIZE(rails); i++) {
++		struct device_node *node __free(device_node) =
++			of_get_child_by_name(dev->of_node, rails[i].name);
++		struct regulator_desc *desc;
++		struct regulator_dev *rdev;
++
++		if (!of_device_is_available(node))
++			return -EINVAL;
++		desc = devm_kmemdup(dev, &rails[i], sizeof(*desc), GFP_KERNEL);
++		if (!desc)
++			return -ENOMEM;
++		if (switchable)
++			desc->ops = &cmf_md_switchable_rail_ops;
++		rdev = devm_regulator_register(dev, desc, &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev), "%s\n", rails[i].name);
++	}
++
++	md = devm_kzalloc(dev, sizeof(*md), GFP_KERNEL);
++	if (!md)
++		return -ENOMEM;
++	domain = &md->genpd;
++	domain->name = "cmf-md-lk";
++	domain->flags = GENPD_FLAG_ALWAYS_ON | GENPD_FLAG_ACTIVE_WAKEUP;
++	if (switchable) {
++		md->maps.spm = spm;
++		md->dev = dev;
++		md->maps.infra = syscon_regmap_lookup_by_phandle(dev->of_node, "mediatek,infracfg");
++		if (IS_ERR(md->maps.infra))
++			return PTR_ERR(md->maps.infra);
++		md->maps.emi = syscon_regmap_lookup_by_phandle(dev->of_node, "mediatek,nemicfg");
++		if (IS_ERR(md->maps.emi))
++			return PTR_ERR(md->maps.emi);
++		domain->name = "cmf-md";
++		domain->flags = GENPD_FLAG_ACTIVE_WAKEUP;
++		domain->power_on = cmf_md_on;
++		domain->power_off = cmf_md_off;
++	}
++	ret = pm_genpd_init(domain, NULL, false);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, cmf_md_remove_domain, domain);
++	if (ret)
++		return ret;
++
++	ret = of_genpd_add_provider_simple(dev->of_node, domain);
++	if (ret)
++		return ret;
++	return devm_add_action_or_reset(dev, cmf_md_remove_provider, dev->of_node);
++}
++
++static const struct of_device_id cmf_md_match[] = {
++	{ .compatible = "cmf,mt6878-lk-modem-resources" },
++	{ .compatible = "cmf,mt6878-switchable-modem-resources" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, cmf_md_match);
++
++/* Static boot tree, with the attached provider retained until reboot. */
++static struct platform_driver cmf_md_driver = {
++	.probe = cmf_md_probe,
++	.driver = {
++		.name = "cmf-md-resources",
++		.of_match_table = cmf_md_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(cmf_md_driver);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("CMF Phone 1 inherited modem resource inspection");
+diff --git a/drivers/soc/mediatek/cmf-md-sequence.h b/drivers/soc/mediatek/cmf-md-sequence.h
+new file mode 100644
+index 000000000..f4ae54fed
+--- /dev/null
++++ b/drivers/soc/mediatek/cmf-md-sequence.h
+@@ -0,0 +1,67 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6878 modem sequence from CMF's mtk-scpsys-mt6878.c and mtk-scpsys.c. */
++#ifndef CMF_MD_SEQUENCE_H
++#define CMF_MD_SEQUENCE_H
++
++struct cmf_md_maps {
++	struct regmap *spm, *infra, *emi;
++};
++
++static int cmf_md_protect(struct regmap *map, unsigned int base,
++			  unsigned int mask, bool protect)
++{
++	unsigned int value;
++	int ret;
++
++	/* EN, SET, CLR, STA are consecutive words. */
++	ret = regmap_write(map, base + (protect ? 4 : 8), mask);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(map, base, value,
++				       (value & mask) == (protect ? mask : 0),
++				       10, 1000000);
++	if (ret)
++		return ret;
++	return regmap_read_poll_timeout(map, base + 12, value,
++					(value & mask) == (protect ? mask : 0),
++					10, 1000000);
++}
++
++static int cmf_md_switch(struct cmf_md_maps *maps, bool on)
++{
++	unsigned int value;
++	int ret;
++
++	if (on) {
++		ret = regmap_clear_bits(maps->spm, 0xf24, 3);
++	} else {
++		ret = cmf_md_protect(maps->infra, 0xc50, BIT(9), true);
++		if (!ret)
++			ret = cmf_md_protect(maps->infra, 0xc40, BIT(11), true);
++		if (!ret)
++			ret = cmf_md_protect(maps->emi, 0x80, BIT(6) | BIT(7), true);
++	}
++	if (ret)
++		return ret;
++
++	ret = regmap_update_bits(maps->spm, 0xe00, BIT(2), on ? BIT(2) : 0);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(maps->spm, 0xe00, value,
++				       !!(value & BIT(30)) == on, 10, 1000000);
++	if (ret)
++		return ret;
++
++	/* CMF asserts external buck isolation only after MD ACK drops. */
++	if (!on)
++		return regmap_set_bits(maps->spm, 0xf24, 3);
++
++	ret = cmf_md_protect(maps->emi, 0x80, BIT(6) | BIT(7), false);
++	if (!ret)
++		ret = cmf_md_protect(maps->infra, 0xc40, BIT(11), false);
++	if (!ret)
++		ret = cmf_md_protect(maps->infra, 0xc50, BIT(9), false);
++	return ret;
++}
++
++#endif
+diff --git a/drivers/soc/mediatek/mt6878-mmsys.h b/drivers/soc/mediatek/mt6878-mmsys.h
+new file mode 100644
+index 000000000..3bd60f792
+--- /dev/null
++++ b/drivers/soc/mediatek/mt6878-mmsys.h
+@@ -0,0 +1,61 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * MT6878 OVL0_2L -> DSC0 -> DSI0 route with the PQ chain bypassed (Stage 58).
++ *
++ * LK runs the vendor main path with PQ: OVL0_2L -> OVL1_2L -> OVL2_2L
++ * (BG crossbars), blend crossbar 2 -> PQ-in crossbar 0 -> RSZ0 ... DITHER0 ->
++ * PQ-out crossbar 0, and its MUTEX0 holds all of those engines (0x1280ffc7).
++ * The native DRM path and mutex only own OVL0_2L, DSC0 and DSI0, so the route
++ * must not pass through engines nothing triggers (Stage 57). This table
++ * selects the vendor DRM_BYPASS_PQ hops for OVL0_2L alone:
++ *   OVL_CON OVL0_2L_TO_BLEND_CROSSBAR0 -> BLEND_CROSSBAR0 to PQ0_IN_CB0 ->
++ *   PQ0_IN_CB_TO_PQ_OUT_CB4 -> PQ0_OUT_CB4 to SPLIT_OUT_CB2 -> DSC0_0 ->
++ *   COMP_OUT_CROSSBAR0 to DSI0
++ * (vendor mtk_ddp_ovl_con/mout_en_MT6878, mtk_ddp_insert_dsc_prim_mt6878).
++ * The DSC hops and the shadow/crossbar controls are unchanged from LK.
++ */
++#ifndef __SOC_MEDIATEK_MT6878_MMSYS_H
++#define __SOC_MEDIATEK_MT6878_MMSYS_H
++
++struct mt6878_mmsys_path_config {
++	u16 offset;
++	u32 mask;
++	u32 value;
++	u32 readback_mask;
++};
++
++#define MT6878_PATH_ALL		GENMASK(31, 0)
++
++/*
++ * LK sets its crossbar enables in both halves (0x0001_0001); the new bypass
++ * hops follow the same convention. Whether an upper half is writable or a
++ * read-only mirror of the active selection is not established; with the
++ * shadow bypass set, either way the full readback equals the written value
++ * once the route is active, so those entries are verified in full.
++ *
++ * 0xc28 and 0xc44 (unnamed, upper half only) are read-only mirrors of the
++ * active route: on the phone they read 0 under this route and returned to
++ * LK's values with LK's route, without being written (Stage 58 trial), so
++ * they are not in the table. Every old LK hop is written to zero
++ * explicitly, so no stale crossbar stays enabled. Order: shadow bypass first,
++ * then ascending offsets.
++ */
++static const struct mt6878_mmsys_path_config mt6878_dsc_path[] = {
++	{ 0xc00, MT6878_PATH_ALL, 0x00000001, MT6878_PATH_ALL },	/* DISPSYS_BYPASS_MUX_SHADOW */
++	{ 0xc08, MT6878_PATH_ALL, 0x00000004, MT6878_PATH_ALL },	/* MMSYS_OVL_CON: OVL0_2L_TO_BLEND_CROSSBAR0 (LK 0x68) */
++	{ 0xc0c, MT6878_PATH_ALL, 0x00ff0000, MT6878_PATH_ALL },	/* MMSYS_CROSSBAR_CON */
++	{ 0xc10, MT6878_PATH_ALL, 0x00000000, MT6878_PATH_ALL },	/* OVL_BG_CROSSBAR0_MOUT_EN: no cascade (LK to OVL1_2L) */
++	{ 0xc14, MT6878_PATH_ALL, 0x00000000, MT6878_PATH_ALL },	/* OVL_BG_CROSSBAR1_MOUT_EN: no cascade (LK to OVL2_2L) */
++	{ 0xc34, MT6878_PATH_ALL, 0x00010001, MT6878_PATH_ALL },	/* OVL_BLEND_CROSSBAR0_MOUT_EN: to PQ0_IN_CB0 */
++	{ 0xc3c, MT6878_PATH_ALL, 0x00000000, MT6878_PATH_ALL },	/* OVL_BLEND_CROSSBAR2_MOUT_EN: off (LK to PQ0_IN_CB0) */
++	{ 0xd00, MT6878_PATH_ALL, 0x00040004, MT6878_PATH_ALL },	/* PQ_IN_CROSSBAR0_MOUT_EN: PQ0_IN_CB_TO_PQ_OUT_CB4 (LK to RSZ0) */
++	{ 0xd20, MT6878_PATH_ALL, 0x00000000, MT6878_PATH_ALL },	/* PQ_OUT_CROSSBAR0_MOUT_EN: off (LK to SPLIT_OUT_CB2) */
++	{ 0xd30, MT6878_PATH_ALL, 0x00020002, MT6878_PATH_ALL },	/* PQ_OUT_CROSSBAR4_MOUT_EN: PQ0_OUT_CB_TO_SPLIT_OUT_CB2 */
++	{ 0xd54, MT6878_PATH_ALL, 0x00010001, MT6878_PATH_ALL },	/* SPLIT_OUT_CROSSBAR2_MOUT_EN */
++	{ 0xd60, MT6878_PATH_ALL, 0x00020000, MT6878_PATH_ALL },	/* SPLIT_OUT_CROSSBAR0_SEL_IN */
++	{ 0xd68, MT6878_PATH_ALL, 0x00000000, MT6878_PATH_ALL },
++	{ 0xd74, MT6878_PATH_ALL, 0x00010001, MT6878_PATH_ALL },	/* COMP_OUT_CROSSBAR0_MOUT_EN */
++	{ 0xd7c, MT6878_PATH_ALL, 0x00000000, MT6878_PATH_ALL },
++};
++
++#endif /* __SOC_MEDIATEK_MT6878_MMSYS_H */
+diff --git a/drivers/soc/mediatek/mtk-mmsys.c b/drivers/soc/mediatek/mtk-mmsys.c
+index 2f3e0778b..6e5dee125 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.c
++++ b/drivers/soc/mediatek/mtk-mmsys.c
+@@ -4,16 +4,20 @@
+  * Author: James Liao <jamesjj.liao@mediatek.com>
+  */
+ 
++#include <linux/clk.h>
+ #include <linux/delay.h>
+ #include <linux/device.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
++#include <linux/pm_runtime.h>
+ #include <linux/platform_device.h>
+ #include <linux/reset-controller.h>
+ #include <linux/soc/mediatek/mtk-mmsys.h>
+ 
+ #include "mtk-mmsys.h"
++#include "mt6878-mmsys.h"
+ #include "mt8167-mmsys.h"
+ #include "mt8173-mmsys.h"
+ #include "mt8183-mmsys.h"
+@@ -41,6 +45,19 @@ static const struct mtk_mmsys_driver_data mt6779_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt6779-mm",
+ };
+ 
++/* The fixed DSC path uses the checked API; generic route tables stay empty. */
++static const struct mtk_mmsys_driver_data mt6878_mmsys_driver_data = {
++	.clk_driver = "clk-mt6878-mm",
++	.has_dsi_lanes = true,
++	.has_dsc_path = true,
++};
++
++/* Native clocks are supplied independently, before DISP can register. */
++static const struct mtk_mmsys_driver_data mt6878_native_mmsys_driver_data = {
++	.has_dsi_lanes = true,
++	.has_dsc_path = true,
++};
++
+ static const struct mtk_mmsys_driver_data mt6795_mmsys_driver_data = {
+ 	.clk_driver = "clk-mt6795-mm",
+ 	.routes = mt8173_mmsys_routing_table,
+@@ -158,6 +175,182 @@ struct mtk_mmsys {
+ 	spinlock_t lock; /* protects mmsys_sw_rst_b reg */
+ 	struct reset_controller_dev rcdev;
+ 	struct cmdq_client_reg cmdq_base;
++	struct clk *bus_clk;
++	struct mutex dsi_lock; /* serializes lane/path ownership and their PM references */
++	bool dsi_lanes_held;
++	bool dsc_path_held;
++	u32 dsc_path_saved[ARRAY_SIZE(mt6878_dsc_path)];
++};
++
++/* MT6878 DSI0 only: DSI1 has separate selectors at 0x178/0x17c. */
++int mtk_mmsys_dsi_lane_get(struct device *dev, unsigned int port)
++{
++	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
++	int ret;
++
++	if (!mmsys || !mmsys->data->has_dsi_lanes || port)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&mmsys->dsi_lock);
++	if (mmsys->dsi_lanes_held) {
++		ret = -EBUSY;
++		goto out;
++	}
++
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		goto out;
++
++	/* Vendor no-swap ordering, before PHY CKMODE/LPRX/PLL preparation. */
++	writel(0, mmsys->regs + 0x174);
++	writel(0x00a43210, mmsys->regs + 0x170);
++	if (readl(mmsys->regs + 0x174) ||
++	    readl(mmsys->regs + 0x170) != 0x00a43210) {
++		pm_runtime_put_sync(dev);
++		ret = -EIO;
++		goto out;
++	}
++
++	mmsys->dsi_lanes_held = true;
++	ret = 0;
++out:
++	mutex_unlock(&mmsys->dsi_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_mmsys_dsi_lane_get);
++
++void mtk_mmsys_dsi_lane_put(struct device *dev)
++{
++	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
++
++	if (!mmsys || !mmsys->data->has_dsi_lanes)
++		return;
++
++	mutex_lock(&mmsys->dsi_lock);
++	if (mmsys->dsi_lanes_held) {
++		/* Caller has isolated pads and stopped the PLL; retain lane mapping. */
++		mmsys->dsi_lanes_held = false;
++		pm_runtime_put_sync(dev);
++	}
++	mutex_unlock(&mmsys->dsi_lock);
++}
++EXPORT_SYMBOL_GPL(mtk_mmsys_dsi_lane_put);
++
++static void mtk_mmsys_dsc_path_restore(struct mtk_mmsys *mmsys, unsigned int count)
++{
++	const struct mt6878_mmsys_path_config *config;
++	u32 value;
++
++	while (count) {
++		config = &mt6878_dsc_path[--count];
++		value = readl(mmsys->regs + config->offset);
++		value = (value & ~config->mask) | mmsys->dsc_path_saved[count];
++		writel(value, mmsys->regs + config->offset);
++	}
++	/* Flush the last write before the bus/domain reference can be released. */
++	readl(mmsys->regs + mt6878_dsc_path[0].offset);
++}
++
++/* Caller must quiesce the complete display pipe before acquire and release. */
++int mtk_mmsys_dsc_path_get(struct device *dev)
++{
++	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
++	const struct mt6878_mmsys_path_config *config;
++	unsigned int i;
++	u32 value;
++	int ret;
++
++	if (!mmsys || !mmsys->data->has_dsc_path)
++		return -EOPNOTSUPP;
++
++	mutex_lock(&mmsys->dsi_lock);
++	if (mmsys->dsc_path_held) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = pm_runtime_resume_and_get(dev);
++	if (ret < 0)
++		goto out;
++
++	/* Snapshot every owned field before changing shadow or crossbar controls. */
++	for (i = 0; i < ARRAY_SIZE(mt6878_dsc_path); i++) {
++		config = &mt6878_dsc_path[i];
++		mmsys->dsc_path_saved[i] = readl(mmsys->regs + config->offset) &
++					 config->mask;
++	}
++
++	/*
++	 * Stage 85c: LK leaves the MUX (0xc00 bit 0) and CROSSBAR (0xc0c
++	 * 0x00ff0000) shadows bypassed, and the vendor driver sets both, plus
++	 * GCE_EVENT_SEL (0x308) = 3, on every CRTC start. A native DISP power
++	 * cycle clears them, so crossbar writes then land in shadow and fail the
++	 * readback below (silent -EIO; the CRTC never enabled).
++	 */
++	writel(readl(mmsys->regs + 0xc00) | BIT(0), mmsys->regs + 0xc00);
++	writel(readl(mmsys->regs + 0xc0c) | 0x00ff0000, mmsys->regs + 0xc0c);
++	if (!readl(mmsys->regs + 0x308))
++		writel(0x3, mmsys->regs + 0x308);
++
++	for (i = 0; i < ARRAY_SIZE(mt6878_dsc_path); i++) {
++		config = &mt6878_dsc_path[i];
++		value = readl(mmsys->regs + config->offset);
++		value = (value & ~config->mask) | config->value;
++		writel(value, mmsys->regs + config->offset);
++		if (config->readback_mask &&
++		    (readl(mmsys->regs + config->offset) & config->readback_mask) !=
++		    (config->value & config->readback_mask)) {
++			dev_warn(dev, "Stage 85c: DSC route %#x readback %#x, want %#x\n",
++				 config->offset, readl(mmsys->regs + config->offset),
++				 config->value & config->readback_mask);
++			mtk_mmsys_dsc_path_restore(mmsys, i + 1);
++			pm_runtime_put_sync(dev);
++			ret = -EIO;
++			goto out;
++		}
++	}
++
++	mmsys->dsc_path_held = true;
++	ret = 0;
++out:
++	mutex_unlock(&mmsys->dsi_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mtk_mmsys_dsc_path_get);
++
++void mtk_mmsys_dsc_path_put(struct device *dev)
++{
++	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
++
++	if (!mmsys || !mmsys->data->has_dsc_path)
++		return;
++
++	mutex_lock(&mmsys->dsi_lock);
++	if (mmsys->dsc_path_held) {
++		mtk_mmsys_dsc_path_restore(mmsys, ARRAY_SIZE(mt6878_dsc_path));
++		mmsys->dsc_path_held = false;
++		pm_runtime_put_sync(dev);
++	}
++	mutex_unlock(&mmsys->dsi_lock);
++}
++EXPORT_SYMBOL_GPL(mtk_mmsys_dsc_path_put);
++
++static int mtk_mmsys_runtime_resume(struct device *dev)
++{
++	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
++
++	return clk_prepare_enable(mmsys->bus_clk);
++}
++
++static int mtk_mmsys_runtime_suspend(struct device *dev)
++{
++	struct mtk_mmsys *mmsys = dev_get_drvdata(dev);
++
++	clk_disable_unprepare(mmsys->bus_clk);
++	return 0;
++}
++
++static const struct dev_pm_ops mtk_mmsys_pm_ops = {
++	RUNTIME_PM_OPS(mtk_mmsys_runtime_suspend, mtk_mmsys_runtime_resume, NULL)
+ };
+ 
+ static void mtk_mmsys_update_bits(struct mtk_mmsys *mmsys, u32 offset, u32 mask, u32 val,
+@@ -389,7 +582,7 @@ static const struct reset_control_ops mtk_mmsys_reset_ops = {
+ static int mtk_mmsys_probe(struct platform_device *pdev)
+ {
+ 	struct device *dev = &pdev->dev;
+-	struct platform_device *clks;
++	struct platform_device *clks = NULL;
+ 	struct platform_device *drm;
+ 	struct mtk_mmsys *mmsys;
+ 	int ret;
+@@ -427,12 +620,27 @@ static int mtk_mmsys_probe(struct platform_device *pdev)
+ 		dev_dbg(dev, "No mediatek,gce-client-reg!\n");
+ 
+ 	platform_set_drvdata(pdev, mmsys);
++	mutex_init(&mmsys->dsi_lock);
++	if (mmsys->data->has_dsi_lanes) {
++		/* Never access the config bank without its domain and bus clock. */
++		if (!dev->pm_domain)
++			return dev_err_probe(dev, -EINVAL, "Missing MMSYS power domain\n");
++		mmsys->bus_clk = devm_clk_get(dev, "bus");
++		if (IS_ERR(mmsys->bus_clk))
++			return dev_err_probe(dev, PTR_ERR(mmsys->bus_clk),
++					     "Missing MMSYS bus clock\n");
++		ret = devm_pm_runtime_enable(dev);
++		if (ret)
++			return ret;
++	}
+ 
+-	clks = platform_device_register_data(&pdev->dev, mmsys->data->clk_driver,
+-					     PLATFORM_DEVID_AUTO, NULL, 0);
+-	if (IS_ERR(clks))
+-		return PTR_ERR(clks);
+-	mmsys->clks_pdev = clks;
++	if (mmsys->data->clk_driver) {
++		clks = platform_device_register_data(dev, mmsys->data->clk_driver,
++						     PLATFORM_DEVID_AUTO, NULL, 0);
++		if (IS_ERR(clks))
++			return PTR_ERR(clks);
++		mmsys->clks_pdev = clks;
++	}
+ 
+ 	if (mmsys->data->is_vppsys)
+ 		goto out_probe_done;
+@@ -462,6 +670,8 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
+ 	{ .compatible = "mediatek,mt2712-mmsys", .data = &mt2712_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6779-mmsys", .data = &mt6779_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6795-mmsys", .data = &mt6795_mmsys_driver_data },
++	{ .compatible = "mediatek,mt6878-mmsys0", .data = &mt6878_mmsys_driver_data },
++	{ .compatible = "mediatek,mt6878-mmsys0-native", .data = &mt6878_native_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },
+ 	{ .compatible = "mediatek,mt8173-mmsys", .data = &mt8173_mmsys_driver_data },
+@@ -486,6 +696,7 @@ MODULE_DEVICE_TABLE(of, of_match_mtk_mmsys);
+ static struct platform_driver mtk_mmsys_drv = {
+ 	.driver = {
+ 		.name = "mtk-mmsys",
++		.pm = pm_ptr(&mtk_mmsys_pm_ops),
+ 		.of_match_table = of_match_mtk_mmsys,
+ 	},
+ 	.probe = mtk_mmsys_probe,
+diff --git a/drivers/soc/mediatek/mtk-mmsys.h b/drivers/soc/mediatek/mtk-mmsys.h
+index fe628d5f5..0f0277977 100644
+--- a/drivers/soc/mediatek/mtk-mmsys.h
++++ b/drivers/soc/mediatek/mtk-mmsys.h
+@@ -111,6 +111,8 @@ struct mtk_mmsys_routes {
+  * @num_routes: Array size of the routes.
+  * @sw0_rst_offset: Register offset for the reset control.
+  * @num_resets: Number of reset bits that are defined
++ * @has_dsc_path: Supports the checked, fixed single-pipe DSC path API.
++ * @has_dsi_lanes: Supports powered DSI0 lane selection.
+  * @is_vppsys: Whether the mmsys is VPPSYS (Video Processing Pipe)
+  *             or VDOSYS (Video). Only VDOSYS needs to be added to drm driver.
+  * @vsync_len: VSYNC length of the MIXER.
+@@ -137,6 +139,8 @@ struct mtk_mmsys_driver_data {
+ 	const u16 sw0_rst_offset;
+ 	const u8 *rst_tb;
+ 	const u32 num_resets;
++	const bool has_dsc_path;
++	const bool has_dsi_lanes;
+ 	const bool is_vppsys;
+ 	const u8 vsync_len;
+ };
+diff --git a/drivers/soc/mediatek/mtk-mutex.c b/drivers/soc/mediatek/mtk-mutex.c
+index eb5d381ff..b195470cb 100644
+--- a/drivers/soc/mediatek/mtk-mutex.c
++++ b/drivers/soc/mediatek/mtk-mutex.c
+@@ -6,7 +6,9 @@
+ #include <linux/clk.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
++#include <linux/pm_runtime.h>
+ #include <linux/platform_device.h>
+ #include <linux/regmap.h>
+ #include <linux/soc/mediatek/mtk-mmsys.h>
+@@ -333,6 +335,7 @@
+ struct mtk_mutex {
+ 	u8 id;
+ 	bool claimed;
++	bool prepared;
+ };
+ 
+ enum mtk_mutex_sof_id {
+@@ -356,6 +359,7 @@ struct mtk_mutex_data {
+ 	const u16 mutex_mod1_reg;
+ 	const u16 mutex_sof_reg;
+ 	const bool no_clk;
++	const bool needs_pm;
+ };
+ 
+ struct mtk_mutex_ctx {
+@@ -366,6 +370,8 @@ struct mtk_mutex_ctx {
+ 	const struct mtk_mutex_data	*data;
+ 	phys_addr_t			addr;
+ 	struct cmdq_client_reg		cmdq_reg;
++	/* Protect MT6878 preparation, CPU register access and power release. */
++	struct mutex			power_lock;
+ };
+ 
+ static const u8 mt2701_mutex_mod[DDP_COMPONENT_ID_MAX] = {
+@@ -730,6 +736,25 @@ static const u16 mt8195_mutex_sof[DDP_MUTEX_SOF_MAX] = {
+ 		MT8195_MUTEX_SOF_DP_INTF1 | MT8195_MUTEX_EOF_DP_INTF1,
+ };
+ 
++/* Fixed MT6878 single-pipe OVL0_2L -> DSC0 -> DSI0 membership. */
++static const u8 mt6878_mutex_mod[DDP_COMPONENT_ID_MAX] = {
++	[DDP_COMPONENT_OVL_2L0] = 0,
++	[DDP_COMPONENT_DSC0] = 23,
++	[DDP_COMPONENT_DSI0] = 25,
++};
++
++static const u16 mt6878_mutex_sof[DDP_MUTEX_SOF_MAX] = {
++	[MUTEX_SOF_DSI0] = 1 | (1 << 6),
++};
++
++static const struct mtk_mutex_data mt6878_mutex_driver_data = {
++	.mutex_mod = mt6878_mutex_mod,
++	.mutex_sof = mt6878_mutex_sof,
++	.mutex_mod_reg = MT8183_MUTEX0_MOD0,
++	.mutex_sof_reg = MT8183_MUTEX0_SOF0,
++	.needs_pm = true,
++};
++
+ static const struct mtk_mutex_data mt2701_mutex_driver_data = {
+ 	.mutex_mod = mt2701_mutex_mod,
+ 	.mutex_sof = mt2712_mutex_sof,
+@@ -867,15 +892,121 @@ void mtk_mutex_put(struct mtk_mutex *mutex)
+ 
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
++	if (mtx->data->needs_pm) {
++		mutex_lock(&mtx->power_lock);
++		if (!WARN_ON(mutex->prepared))
++			mutex->claimed = false;
++		mutex_unlock(&mtx->power_lock);
++		return;
++	}
++
+ 	mutex->claimed = false;
+ }
+ EXPORT_SYMBOL_GPL(mtk_mutex_put);
+ 
++/* MT6878 CPU operations run in process context and serialize against power-off. */
++static bool mt6878_mutex_lock_prepared(struct mtk_mutex_ctx *mtx, struct mtk_mutex *mutex)
++{
++	mutex_lock(&mtx->power_lock);
++	if (!mutex->prepared) {
++		mutex_unlock(&mtx->power_lock);
++		return false;
++	}
++	return true;
++}
++
++static void mt6878_mutex_update_comp(struct mtk_mutex_ctx *mtx, struct mtk_mutex *mutex,
++				     enum mtk_ddp_comp_id id, bool add)
++{
++	u32 offset, mask, value;
++
++	/* Unlisted zero entries must never alias OVL0's real module bit zero. */
++	if (id != DDP_COMPONENT_OVL_2L0 && id != DDP_COMPONENT_DSC0 &&
++	    id != DDP_COMPONENT_DSI0)
++		return;
++	if (!mt6878_mutex_lock_prepared(mtx, mutex))
++		return;
++
++	offset = DISP_REG_MUTEX_MOD(mtx, mtx->data->mutex_mod[id], mutex->id);
++	mask = BIT(mtx->data->mutex_mod[id]);
++	value = readl_relaxed(mtx->regs + offset);
++	writel_relaxed(add ? value | mask : value & ~mask, mtx->regs + offset);
++	if (id == DDP_COMPONENT_DSI0)
++		writel_relaxed(add ? mtx->data->mutex_sof[MUTEX_SOF_DSI0] : 0,
++			       mtx->regs +
++			       DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg, mutex->id));
++	mutex_unlock(&mtx->power_lock);
++}
++
++enum mt6878_mutex_op {
++	MT6878_MUTEX_ENABLE,
++	MT6878_MUTEX_DISABLE,
++	MT6878_MUTEX_ACQUIRE,
++	MT6878_MUTEX_RELEASE,
++};
++
++static void mt6878_mutex_control(struct mtk_mutex_ctx *mtx, struct mtk_mutex *mutex,
++				 enum mt6878_mutex_op op)
++{
++	u32 tmp;
++
++	if (!mt6878_mutex_lock_prepared(mtx, mutex))
++		return;
++	switch (op) {
++	case MT6878_MUTEX_ENABLE:
++		writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
++		break;
++	case MT6878_MUTEX_DISABLE:
++		writel(0, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
++		break;
++	case MT6878_MUTEX_ACQUIRE:
++		writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
++		writel(1, mtx->regs + DISP_REG_MUTEX(mutex->id));
++		if (readl_poll_timeout_atomic(mtx->regs + DISP_REG_MUTEX(mutex->id),
++					      tmp, tmp & INT_MUTEX, 1, 10000))
++			dev_err(mtx->dev, "could not acquire mutex %d\n", mutex->id);
++		break;
++	case MT6878_MUTEX_RELEASE:
++		writel(0, mtx->regs + DISP_REG_MUTEX(mutex->id));
++		break;
++	}
++	mutex_unlock(&mtx->power_lock);
++}
++
+ int mtk_mutex_prepare(struct mtk_mutex *mutex)
+ {
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+-	return clk_prepare_enable(mtx->clk);
++	int ret;
++
++	if (!mtx->data->needs_pm)
++		return clk_prepare_enable(mtx->clk);
++	mutex_lock(&mtx->power_lock);
++	if (mutex->prepared) {
++		ret = -EBUSY;
++		goto out;
++	}
++	ret = pm_runtime_resume_and_get(mtx->dev);
++	if (ret < 0)
++		goto out;
++	ret = clk_prepare_enable(mtx->clk);
++	if (ret) {
++		pm_runtime_put_sync(mtx->dev);
++		goto out;
++	}
++	/*
++	 * LK hands over this mutex with its full PQ path in MOD0 (0x1280ffc7).
++	 * The native path owns only OVL0_2L, DSC0 and DSI0 and adds them with
++	 * read-modify-write, so drop inherited membership and SOF first. MOD1
++	 * is unused on MT6878. The caller has quiesced the pipe.
++	 */
++	writel_relaxed(0, mtx->regs + DISP_REG_MUTEX_SOF(mtx->data->mutex_sof_reg,
++							 mutex->id));
++	writel(0, mtx->regs + mtx->data->mutex_mod_reg + 0x20 * mutex->id);
++	mutex->prepared = true;
++out:
++	mutex_unlock(&mtx->power_lock);
++	return ret;
+ }
+ EXPORT_SYMBOL_GPL(mtk_mutex_prepare);
+ 
+@@ -883,7 +1014,18 @@ void mtk_mutex_unprepare(struct mtk_mutex *mutex)
+ {
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+-	clk_disable_unprepare(mtx->clk);
++
++	if (!mtx->data->needs_pm) {
++		clk_disable_unprepare(mtx->clk);
++		return;
++	}
++	mutex_lock(&mtx->power_lock);
++	if (mutex->prepared) {
++		mutex->prepared = false;
++		clk_disable_unprepare(mtx->clk);
++		pm_runtime_put_sync(mtx->dev);
++	}
++	mutex_unlock(&mtx->power_lock);
+ }
+ EXPORT_SYMBOL_GPL(mtk_mutex_unprepare);
+ 
+@@ -896,6 +1038,11 @@ void mtk_mutex_add_comp(struct mtk_mutex *mutex,
+ 	unsigned int sof_id, mod_id;
+ 	unsigned int offset;
+ 
++	if (mtx->data->needs_pm) {
++		mt6878_mutex_update_comp(mtx, mutex, id, true);
++		return;
++	}
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	switch (id) {
+@@ -947,6 +1094,11 @@ void mtk_mutex_remove_comp(struct mtk_mutex *mutex,
+ 	unsigned int mod_id;
+ 	unsigned int offset;
+ 
++	if (mtx->data->needs_pm) {
++		mt6878_mutex_update_comp(mtx, mutex, id, false);
++		return;
++	}
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	switch (id) {
+@@ -979,6 +1131,11 @@ void mtk_mutex_enable(struct mtk_mutex *mutex)
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+ 
++	if (mtx->data->needs_pm) {
++		mt6878_mutex_control(mtx, mutex, MT6878_MUTEX_ENABLE);
++		return;
++	}
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
+@@ -992,6 +1149,9 @@ int mtk_mutex_enable_by_cmdq(struct mtk_mutex *mutex, void *pkt)
+ 	struct cmdq_pkt *cmdq_pkt = (struct cmdq_pkt *)pkt;
+ 	dma_addr_t en_addr = mtx->addr + DISP_REG_MUTEX_EN(mutex->id);
+ 
++	if (mtx->data->needs_pm)
++		return -EOPNOTSUPP;
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	if (!mtx->cmdq_reg.size) {
+@@ -1010,6 +1170,11 @@ void mtk_mutex_disable(struct mtk_mutex *mutex)
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+ 
++	if (mtx->data->needs_pm) {
++		mt6878_mutex_control(mtx, mutex, MT6878_MUTEX_DISABLE);
++		return;
++	}
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	writel(0, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
+@@ -1022,6 +1187,11 @@ void mtk_mutex_acquire(struct mtk_mutex *mutex)
+ 						 mutex[mutex->id]);
+ 	u32 tmp;
+ 
++	if (mtx->data->needs_pm) {
++		mt6878_mutex_control(mtx, mutex, MT6878_MUTEX_ACQUIRE);
++		return;
++	}
++
+ 	writel(1, mtx->regs + DISP_REG_MUTEX_EN(mutex->id));
+ 	writel(1, mtx->regs + DISP_REG_MUTEX(mutex->id));
+ 	if (readl_poll_timeout_atomic(mtx->regs + DISP_REG_MUTEX(mutex->id),
+@@ -1035,6 +1205,11 @@ void mtk_mutex_release(struct mtk_mutex *mutex)
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+ 
++	if (mtx->data->needs_pm) {
++		mt6878_mutex_control(mtx, mutex, MT6878_MUTEX_RELEASE);
++		return;
++	}
++
+ 	writel(0, mtx->regs + DISP_REG_MUTEX(mutex->id));
+ }
+ EXPORT_SYMBOL_GPL(mtk_mutex_release);
+@@ -1047,6 +1222,9 @@ int mtk_mutex_write_mod(struct mtk_mutex *mutex,
+ 	unsigned int reg;
+ 	u32 offset, mod_id;
+ 
++	if (mtx->data->needs_pm)
++		return -EOPNOTSUPP;
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	if (idx < MUTEX_MOD_IDX_MDP_RDMA0 ||
+@@ -1076,6 +1254,9 @@ int mtk_mutex_write_sof(struct mtk_mutex *mutex,
+ 	struct mtk_mutex_ctx *mtx = container_of(mutex, struct mtk_mutex_ctx,
+ 						 mutex[mutex->id]);
+ 
++	if (mtx->data->needs_pm)
++		return -EOPNOTSUPP;
++
+ 	WARN_ON(&mtx->mutex[mutex->id] != mutex);
+ 
+ 	if (idx < MUTEX_SOF_IDX_SINGLE_MODE ||
+@@ -1105,6 +1286,8 @@ static int mtk_mutex_probe(struct platform_device *pdev)
+ 	for (i = 0; i < MTK_MUTEX_MAX_HANDLES; i++)
+ 		mtx->mutex[i].id = i;
+ 
++	mtx->dev = dev;
++	mutex_init(&mtx->power_lock);
+ 	mtx->data = of_device_get_match_data(dev);
+ 
+ 	if (!mtx->data->no_clk) {
+@@ -1126,11 +1309,19 @@ static int mtk_mutex_probe(struct platform_device *pdev)
+ 		dev_dbg(dev, "No mediatek,gce-client-reg!\n");
+ 
+ 	platform_set_drvdata(pdev, mtx);
++	if (mtx->data->needs_pm) {
++		if (!dev->pm_domain)
++			return dev_err_probe(dev, -EINVAL, "Missing mutex power domain\n");
++		ret = devm_pm_runtime_enable(dev);
++		if (ret)
++			return ret;
++	}
+ 
+ 	return 0;
+ }
+ 
+ static const struct of_device_id mutex_driver_dt_match[] = {
++	{ .compatible = "mediatek,mt6878-disp-mutex", .data = &mt6878_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt2701-disp-mutex", .data = &mt2701_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt2712-disp-mutex", .data = &mt2712_mutex_driver_data },
+ 	{ .compatible = "mediatek,mt6795-disp-mutex", .data = &mt6795_mutex_driver_data },
+diff --git a/include/linux/soc/mediatek/mtk-mmsys.h b/include/linux/soc/mediatek/mtk-mmsys.h
+index 4885b065b..7c65e9f8f 100644
+--- a/include/linux/soc/mediatek/mtk-mmsys.h
++++ b/include/linux/soc/mediatek/mtk-mmsys.h
+@@ -6,6 +6,8 @@
+ #ifndef __MTK_MMSYS_H
+ #define __MTK_MMSYS_H
+ 
++#include <linux/errno.h>
++#include <linux/kconfig.h>
+ #include <linux/mailbox_controller.h>
+ #include <linux/mailbox/mtk-cmdq-mailbox.h>
+ #include <linux/soc/mediatek/mtk-cmdq.h>
+@@ -13,6 +15,41 @@
+ enum mtk_ddp_comp_id;
+ struct device;
+ 
++/*
++ * Fixed MT6878 OVL0_2L/PQ-bypass/DSC0/DSI0 path. The caller must quiesce
++ * the complete display pipe before get/put, hold the returned PM reference
++ * throughout its use, and serialize this API against other route writers.
++ * CRTC use is opt-in; enable only after validating the complete native graph.
++ */
++#if IS_REACHABLE(CONFIG_MTK_MMSYS)
++int mtk_mmsys_dsc_path_get(struct device *dev);
++void mtk_mmsys_dsc_path_put(struct device *dev);
++#else
++static inline int mtk_mmsys_dsc_path_get(struct device *dev)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline void mtk_mmsys_dsc_path_put(struct device *dev)
++{
++}
++#endif
++
++/* Hold the MMSYS domain/bus until the caller has isolated and stopped its PHY. */
++#if IS_REACHABLE(CONFIG_MTK_MMSYS)
++int mtk_mmsys_dsi_lane_get(struct device *dev, unsigned int port);
++void mtk_mmsys_dsi_lane_put(struct device *dev);
++#else
++static inline int mtk_mmsys_dsi_lane_get(struct device *dev, unsigned int port)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline void mtk_mmsys_dsi_lane_put(struct device *dev)
++{
++}
++#endif
++
+ enum mtk_dpi_out_format_con {
+ 	MTK_DPI_RGB888_SDR_CON,
+ 	MTK_DPI_RGB888_DDR_CON,
+-- 
+2.53.0
+

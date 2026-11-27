@@ -1,0 +1,325 @@
+#!/bin/busybox sh
+# CMF Phone 1 mainline v12 init (Stage 95c: journaled internal root)
+# v12: the crash-guard probe still mounts the internal root ro,noload, but
+#   noload survives remount and switch_root, so v11 ran the live root rw
+#   without its ext4 journal (Stage 95 CHECKPOINT-7). v12 unmounts the probe
+#   and mounts again with the journal (replaying it), re-checks the crash
+#   marker on that view, and refuses a root still showing norecovery.
+# v11: verify and try the internal root before the v10 SD and rescue paths.
+# v10: after the USB gadget is bound, an SD with /etc/cmf-native-boot and
+#   systemd gets switch_root'ed into, unless a previous native attempt never
+#   reached multi-user (crash guard). Otherwise everything below is v9.
+# v8 fix: PATH is unset in an initramfs, so `setsid sh` failed with
+#   "can't execute 'sh'". Busybox applets still ran because the shell resolves
+#   them internally, which masked the problem. v9 exports PATH and invokes the
+#   shell by absolute path.
+# One USB ACM function only (macOS binds single-function CDC ACM reliably).
+ln -sf /bin/busybox /bin/sh 2>/dev/null || true
+/bin/busybox --install -s 2>/dev/null || true
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export HOME=/root
+
+mount -t proc proc /proc
+printf "4 4 1 7\n" > /proc/sys/kernel/printk
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev
+mkdir -p /dev/pts /sys/kernel/config /sys/fs/pstore /tmp /run
+
+# LK leaves a second overlay plane for its orange-state warning. Keep layer 0.
+# MT6878 OVL0_2L SRC_CON = 0x14002000 + 0x2c; this is not a framebuffer clear.
+cmf_fb_wait=0
+while [ ! -c /dev/fb0 ] && [ "$cmf_fb_wait" -lt 10 ]; do
+    /bin/busybox sleep 1
+    cmf_fb_wait=$((cmf_fb_wait + 1))
+done
+if /bin/busybox readlink /sys/class/drm/card0/device/driver 2>/dev/null | /bin/busybox grep -q mediatek-drm; then
+    # Stage 83b: native DRM owns OVL0_2L; a userspace SRC_CON write races its takeover.
+    echo "skipped: native mediatek-drm owns OVL0_2L" > /tmp/cmf-ovl-mask.log
+elif [ -c /dev/fb0 ]; then
+    {
+        echo "OVL0_2L SRC_CON boot mask"
+        echo "before=$(/bin/busybox devmem 0x1400202c 32)"
+        if /bin/busybox devmem 0x1400202c 32 0x1; then
+            echo "write=ok"
+            echo "after=$(/bin/busybox devmem 0x1400202c 32)"
+        else
+            echo "write=failed"
+        fi
+    } > /tmp/cmf-ovl-mask.log 2>&1
+else
+    echo "skipped: /dev/fb0 did not appear" > /tmp/cmf-ovl-mask.log
+fi
+
+mount -t devpts devpts /dev/pts 2>/dev/null
+mount -t configfs configfs /sys/kernel/config 2>/dev/null
+mount -t pstore pstore /sys/fs/pstore 2>/dev/null
+
+exec >/dev/kmsg 2>&1 </dev/null
+
+echo "<6>=== MAINLINE 7.2 V9 INITRAMFS REACHED ==="
+uname -a
+
+
+if [ -c /dev/tty0 ]; then
+    {
+        echo "=========================================="
+        echo "  NOTHING CMF PHONE 1 - MAINLINE 7.2 (v9)"
+        echo "  Kernel: $(uname -r)"
+        echo "  USB: single ACM console"
+        echo "=========================================="
+        /bin/busybox dmesg 2>/dev/null | /bin/busybox tail -n 25 || true
+    } > /dev/tty0 2>/dev/null
+fi
+
+G=/sys/kernel/config/usb_gadget/g1
+mkdir -p "$G"
+cd "$G" 2>/dev/null
+
+if [ -d "$G" ]; then
+    echo 0x1d6b > idVendor
+    echo 0x0104 > idProduct
+    echo 0x0100 > bcdDevice
+    echo 0x0200 > bcdUSB
+
+    mkdir -p strings/0x409
+    echo "0123456789" > strings/0x409/serialnumber
+    echo "Nothing" > strings/0x409/manufacturer
+    echo "CMF-Mainline-Diagnostic-v9" > strings/0x409/product
+
+    mkdir -p configs/c.1/strings/0x409
+    echo "ACM" > configs/c.1/strings/0x409/configuration
+    echo 250 > configs/c.1/MaxPower
+
+    mkdir -p functions/acm.gs0
+    ln -sf functions/acm.gs0 configs/c.1/acm.gs0
+fi
+
+i=0
+UDC=""
+while [ $i -lt 15 ]; do
+    for u in /sys/class/udc/*; do
+        if [ -e "$u" ]; then
+            UDC="${u##*/}"
+            break 2
+        fi
+    done
+    sleep 1
+    i=$((i + 1))
+done
+
+if [ -n "$UDC" ]; then
+    echo "<6>initramfs: UDC=$UDC"
+    echo "$UDC" > "$G/UDC" 2>/dev/null
+    echo "<6>initramfs: gadget bound to $(cat "$G/UDC" 2>/dev/null)"
+else
+    echo "<3>initramfs: no UDC after 15s (expected under QEMU)"
+fi
+
+# --- v11: stamped internal root and SD override ---------------------------
+sd_parts() {
+    for node in /dev/mmcblk*p*; do
+        [ -b "$node" ] || continue
+        name=${node##*/}; parent=${name%p*}
+        [ "$(cat "/sys/class/block/$parent/device/type" 2>/dev/null)" = SD ] && echo "$node"
+    done
+}
+
+cmf_log() {
+    printf '<6>cmf-init: %s\n' "$*" > /dev/kmsg
+}
+
+prefer_sd() {
+    mkdir -p /sd-preference
+    i=0
+    parts=$(sd_parts)
+    while [ -z "$parts" ] && [ "$i" -lt 15 ]; do
+        sleep 1; i=$((i + 1))
+        parts=$(sd_parts)
+    done
+    for node in $parts; do
+        mount -t ext4 -o ro,noload,nodev "$node" /sd-preference 2>/dev/null || continue
+        preferred=no
+        [ ! -e /sd-preference/etc/cmf-prefer-sd ] || preferred=yes
+        umount /sd-preference || return 1
+        [ "$preferred" != yes ] || return 0
+    done
+    return 1
+}
+
+userdata_parts() {
+    for entry in /sys/class/block/*/uevent; do
+        grep -qx 'PARTNAME=userdata' "$entry" 2>/dev/null || continue
+        node=${entry%/uevent}; node=/dev/${node##*/}
+        [ ! -b "$node" ] || echo "$node"
+    done
+}
+
+internal_prepare() {
+    R=/sysroot
+    table=/cmf/area.bin
+    helper=/sbin/cmf-dmarea
+    mapper=/dev/mapper/cmf-root
+    mkdir -p "$R"
+    set -- $(userdata_parts)
+    i=0
+    while [ "$#" -eq 0 ] && [ "$i" -lt 5 ]; do
+        sleep 1; i=$((i + 1))
+        set -- $(userdata_parts)
+    done
+    [ "$#" -eq 1 ] || { cmf_log "expected one userdata partition, found $#"; return 1; }
+    userdata=$1
+    blockdev --setro "$userdata" || return 1
+    if output=$("$helper" verify "$table" "$userdata" 2>&1); then
+        cmf_log "${output#cmf-dmarea: } first_bad=none"
+    else
+        cmf_log "${output#cmf-dmarea: }"
+        return 1
+    fi
+    blockdev --setrw "$userdata" || return 1
+    if output=$("$helper" up "$table" "$userdata" 2>&1); then
+        mapped=yes
+    else
+        cmf_log "mapping failed: $output"
+        return 1
+    fi
+    mount -t ext4 -o ro,noload,noatime,nodev "$mapper" "$R" || return 1
+    mounted=yes
+    [ -e "$R/etc/cmf-native-boot" ] && [ -x "$R/lib/systemd/systemd" ] &&
+        [ -e "$R/sbin/init" ] || return 1
+    if [ -e "$R/var/lib/cmf-native/attempt" ]; then
+        cmf_log "previous internal attempt did not reach multi-user"
+        return 1
+    fi
+    for m in dev proc sys; do [ -d "$R/$m" ] || return 1; done
+    # v12: drop the noload probe and mount with the journal. A marker written
+    # by the previous boot may exist only in the journal, so check it again
+    # on the replayed view before going writable.
+    umount "$R" || return 1
+    mounted=no
+    if ! mount -t ext4 -o ro,noatime,nodev "$mapper" "$R"; then
+        cmf_log "journaled mount failed"
+        return 1
+    fi
+    mounted=yes
+    if grep -E "^[^ ]+ $R ext4 [^ ]*(norecovery|noload)" /proc/mounts >/dev/null; then
+        cmf_log "internal root still mounted without journal"
+        return 1
+    fi
+    if [ -e "$R/var/lib/cmf-native/attempt" ]; then
+        cmf_log "previous internal attempt did not reach multi-user (journal)"
+        return 1
+    fi
+    cmf_log "internal root mounted with journal"
+    mount -o remount,rw "$R" || return 1
+    mkdir -p "$R/var/lib/cmf-native" || return 1
+    echo "$(cat /proc/sys/kernel/random/boot_id) $(cut -d' ' -f1 /proc/uptime)s" \
+        > "$R/var/lib/cmf-native/attempt" || return 1
+    sync
+    mount -o remount,ro "$R" || return 1
+}
+
+cmf_internal() {
+    userdata=
+    mapped=no
+    mounted=no
+    if ! internal_prepare; then
+        [ "$mounted" != yes ] || umount "$R" || cmf_log "internal unmount failed"
+        [ "$mapped" != yes ] || "$helper" down "$table" || cmf_log "internal mapping removal failed"
+        [ -z "$userdata" ] || blockdev --setro "$userdata" || cmf_log "userdata read-only restore failed"
+        cmf_log "internal unavailable; falling back to SD"
+        return 1
+    fi
+    cmf_log "internal area OK; switch_root to $mapper"
+    moved=
+    for m in dev proc sys; do
+        if mount -o move "/$m" "$R/$m" || mount --move "/$m" "$R/$m"; then
+            moved="$m $moved"
+        else
+            for prior in $moved; do mount --move "$R/$prior" "/$prior"; done
+            umount "$R"
+            "$helper" down "$table"
+            blockdev --setro "$userdata"
+            cmf_log "could not move $m; falling back to SD"
+            return 1
+        fi
+    done
+    exec switch_root "$R" /sbin/init
+}
+
+# --- v10: opt-in native boot (switch_root to systemd on the microSD) ---------
+cmf_native() {
+    R=/sysroot
+    mkdir -p "$R"
+    # Wait (up to 15 s) only until the SD's partitions appear, then check each once.
+    i=0
+    while [ -z "$(sd_parts)" ] && [ "$i" -lt 15 ]; do sleep 1; i=$((i + 1)); done
+    dev=
+    for node in $(sd_parts); do
+        if mount -t ext4 -o ro,noatime,nodev "$node" "$R" 2>/dev/null; then
+            if [ -e "$R/etc/cmf-native-boot" ]; then dev=$node; break; fi
+            umount "$R"
+        fi
+    done
+    [ -n "$dev" ] || { echo "<6>native: no SD with /etc/cmf-native-boot; chroot boot"; return 1; }
+    if [ ! -x "$R/lib/systemd/systemd" ] || [ ! -e "$R/sbin/init" ]; then
+        echo "<3>native: $dev has no systemd; chroot boot"; umount "$R"; return 1
+    fi
+    if [ -e "$R/var/lib/cmf-native/attempt" ]; then
+        echo "<3>native: previous native boot ($(cat "$R/var/lib/cmf-native/attempt")) never reached multi-user; chroot boot. Delete /var/lib/cmf-native/attempt to retry."
+        umount "$R"; return 1
+    fi
+    mount -o remount,rw "$R" || { umount "$R"; return 1; }
+    mkdir -p "$R/var/lib/cmf-native"
+    echo "$(cat /proc/sys/kernel/random/boot_id) $(cut -d' ' -f1 /proc/uptime)s" > "$R/var/lib/cmf-native/attempt"
+    sync
+    mount -o remount,ro "$R"
+    echo "<6>native: switch_root to $dev (systemd)"
+    for m in dev proc sys; do
+        mkdir -p "$R/$m"
+        mount -o move "/$m" "$R/$m" || mount --move "/$m" "$R/$m"
+    done
+    exec switch_root "$R" /sbin/init
+}
+if prefer_sd; then
+    cmf_log "SD preference flag found"
+    cmf_native
+    cmf_internal
+else
+    cmf_internal
+    cmf_native
+fi
+
+if [ -x /cmf/autostart.sh ]; then
+    /cmf/autostart.sh &
+fi
+
+i=0
+while [ $i -lt 20 ]; do
+    [ -c /dev/ttyGS0 ] && break
+    sleep 1
+    i=$((i + 1))
+done
+
+if [ -c /dev/ttyGS0 ]; then
+    echo "<6>initramfs: ACM console ready on /dev/ttyGS0"
+    # Resolve the shell once, by absolute path; never trust PATH here.
+    SH=/bin/sh
+    [ -x "$SH" ] || SH=/bin/busybox
+    echo "<6>initramfs: shell binary = $SH"
+    (
+        /bin/busybox dmesg > /dev/ttyGS0 2>/dev/null || true
+        while true; do
+            printf '\r\n=== CMF mainline v9 shell (%s) — type commands ===\r\n' "$SH" > /dev/ttyGS0 2>/dev/null
+            setsid "$SH" -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1
+            printf '\r\n=== shell exited, respawning in 2s ===\r\n' > /dev/ttyGS0 2>/dev/null
+            sleep 2
+        done
+    ) &
+else
+    echo "<3>initramfs: no ACM console port"
+fi
+
+# Keep PID 1 alive; diagnostics remain in kmsg and the USB serial shell.
+while true; do
+    sleep 60
+done

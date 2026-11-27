@@ -1,0 +1,101 @@
+#!/bin/sh
+# Native boot: bring up the MT6878 connectivity stack (Wi-Fi + Bluetooth),
+# replacing the boot profile's run-radio-test.sh steps prepare-unbound-fem,
+# calibrate and power. Modules live outside /lib/modules on purpose, so udev
+# never autoloads them before their suppliers are ready (the vendor probe is
+# one-shot). Firmware is in /lib/firmware.
+#   cmf-wifi-calibrate          bring up (systemd oneshot)
+#   cmf-wifi-calibrate --check  verify files only, change nothing
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+rel=$(uname -r)
+M=/usr/local/lib/cmf-wifi/$rel
+FW=/lib/firmware
+log() { echo "cmf-wifi: $*"; echo "cmf-wifi: $*" > /dev/kmsg 2>/dev/null || :; }
+
+check_files() {
+	[ -d "$M" ] || { log "no modules for $rel in $M"; return 1; }
+	(cd "$M" && sha256sum -c --quiet SHA256SUMS) || { log "module checksum mismatch"; return 1; }
+	for f in BT_FW.cfg cmf-wifi-nvram.bin conninfra.cfg regulatory.db \
+		 regulatory.db.p7s wifi.cfg soc7_0_ram_bt_1_1_hdr.bin soc7_0_ram_mcu_1_1_hdr.bin; do
+		[ -s "$FW/$f" ] || { log "missing firmware $f"; return 1; }
+	done
+	# Empty on purpose in the boot profile (FEM left unbound).
+	[ -e "$FW/connfem.cfg" ] || { log "missing firmware connfem.cfg"; return 1; }
+	[ "$(wc -c < "$FW/cmf-wifi-nvram.bin")" -eq 6146 ] || { log "NVRAM size wrong"; return 1; }
+}
+
+if [ "${1:-}" = --check ]; then
+	check_files && log "check ok: $M, firmware present"
+	exit $?
+fi
+
+if [ -d /sys/class/net/wlan0 ]; then
+	log "wlan0 already present; nothing to do"
+	exit 0
+fi
+if [ -d /sys/module/wlan_drv_gen4m_6878 ]; then
+	log "wlan driver loaded but no wlan0 (partial bring-up); not retrying automatically"
+	exit 1
+fi
+check_files
+
+dump() { dmesg | tail -n 160; }
+trap 'st=$?; [ "$st" -eq 0 ] || { log "failed ($st)"; dump; }' EXIT
+
+load() { n=$1; shift; log "insmod $n $*"; insmod "$M/$n.ko" "$@"; }
+
+# The vendor one-shot probe cannot retry while kernel suppliers are deferred.
+i=0
+while :; do
+	up=$(cut -d. -f1 /proc/uptime)
+	if [ "$up" -ge 15 ] &&
+	   [ -L /sys/bus/platform/devices/1c001000.syscon:power-controller/driver ] &&
+	   [ -L /sys/bus/spmi/devices/0-04/driver ] &&
+	   [ -L /sys/bus/spmi/devices/0-05/driver ]; then
+		break
+	fi
+	i=$((i + 1)); [ "$i" -le 40 ] || { log "suppliers not ready"; exit 1; }
+	sleep 1
+done
+
+# prepare-unbound-fem
+if [ -f "$M/mt6685-consys-regmap.ko" ]; then
+	load mt6685-consys-regmap
+	[ -L /sys/bus/spmi/devices/0-09/driver ]
+	dmesg | grep -F 'MT6685 DCXO strap bit:' || :
+fi
+for m in cmac rfkill cfg80211 connadp connfem conninfra wmt_chrdev_wifi_connac2; do
+	load "$m"
+done
+[ -d /sys/module/connfem ]
+[ -L /sys/bus/platform/devices/18000000.consys/driver ]
+i=0; while [ ! -c /dev/wmtWifi ] && [ "$i" -lt 10 ]; do sleep 1; i=$((i + 1)); done
+[ -c /dev/wmtWifi ]
+log "connectivity providers bound, /dev/wmtWifi available"
+
+# calibrate
+load wlan_drv_gen4m_6878 nvram=cmf-wifi-nvram.bin
+req=$(mktemp)
+{ printf 'WR-BUF:NVRAM'; cat "$FW/cmf-wifi-nvram.bin"; } > "$req"
+# BusyBox dd, as in the boot profile: the coreutils dd write is rejected by
+# /dev/wmtWifi (first native boot, 24 Nov 2026: WIFI_open then WIFI_close).
+busybox dd if="$req" of=/dev/wmtWifi bs=8192 count=1 2>/dev/null || { rm -f "$req"; exit 1; }
+rm -f "$req"
+log "NVRAM accepted"
+load bluetooth
+load bt_drv_6878
+i=0
+while ! dmesg | grep -Fq '[pre_cal] summary'; do
+	i=$((i + 1)); [ "$i" -le 30 ] || break
+	sleep 1
+done
+dmesg | grep -E '\[pre_cal\] (driver|summary)' || :
+# The vendor log can print "success" alongside a negative return code.
+dmesg | grep -Eq '\[pre_cal\] summary .*bt_cal=\[[02]\]\[[0-9]+\] wf_cal=\[[02]\]'
+
+# power
+printf '1' > /dev/wmtWifi
+i=0; while [ ! -d /sys/class/net/wlan0 ] && [ "$i" -lt 15 ]; do sleep 1; i=$((i + 1)); done
+[ -d /sys/class/net/wlan0 ]
+log "wlan0 up; Wi-Fi and Bluetooth ready"

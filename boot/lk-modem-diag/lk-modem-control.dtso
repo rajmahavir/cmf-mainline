@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+&cmf_infra_ao {
+    compatible = "mediatek,mt6878-infra-ao", "mediatek,mt6878-ccif-clocks", "syscon";
+    #clock-cells = <1>;
+};
+
+&{/soc@0} {
+    #address-cells = <1>;
+    #size-cells = <1>;
+
+    mddriver@d180000 {
+        compatible = "mediatek,mt6878-ccci";
+        reg = <0x0d180000 0x2000>, <0x10209000 0x1000>,
+              <0x1020a000 0x1000>, <0x1020e000 0x1000>;
+        reg-names = "md", "ccif-ap", "ccif-md", "infra";
+        interrupt-parent = <&cmf_gic>;
+        interrupts = <0 491 4 0>, <0 228 4 0>, <0 229 4 0>;
+        interrupt-names = "wdt", "ccif0", "ccif1";
+        clocks = <&cmf_infra_ao 0>, <&cmf_infra_ao 1>,
+                 <&cmf_infra_ao 2>, <&cmf_infra_ao 3>,
+                 <&cmf_infra_ao 4>, <&cmf_infra_ao 5>;
+        clock-names = "ccif-ap", "ccif-md", "ccif1-ap", "ccif1-md", "ccif4-md", "ccif5-md";
+        mediatek,ccif-sram-size = <0x200>;
+        mediatek,ccif-reset-bit = <26>;
+        mediatek,scpsys = <&cmf_gpu_spm>;
+
+        // The shim fills the record before replacing this five-byte status.
+        ccci,modem_info_v2 = <0 0 0 0 0 0 0 0>;
+        status = "fail";
+    };
+};

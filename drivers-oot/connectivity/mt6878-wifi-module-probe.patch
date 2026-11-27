@@ -1,0 +1,27 @@
+--- a/conninfra/Kbuild
++++ b/conninfra/Kbuild
+@@ -192,6 +192,7 @@
+ endif
+ 
+ ifeq ($(CONFIG_MTK_COMBO_CHIP_CONSYS_6878),y)
++ccflags-y += -DCONFIG_MTK_COMBO_CHIP_CONSYS_6878=1
+ ifneq ($(wildcard $(PATH_TO_CONNINFRA_DRV)/conn_drv/connv2/platform/mt6878),)
+ ccflags-y += -I$(KO_CODE_PATH)/conn_drv/connv2/platform/mt6878/include
+ ccflags-y += -I$(KO_CODE_PATH)/conn_drv/connv2/platform/mt6878/include/CODA
+--- a/connfem/connfem_dt_parser.c
++++ b/connfem/connfem_dt_parser.c
+@@ -194,9 +194,12 @@
+ 	}
+ 
+ 	/* If no internal node, search another node ... */
+-	if (!np) {
++	if (!np)
+ 		np = cfm_dt_child_find(dn, node_names);
+-	}
++
++	/* The shipping device tree may only provide the MediaTek node. */
++	if (!np && !connfem_is_internal())
++		np = cfm_dt_child_find(dn, internal_node_names);
+ 
+ 	return np;
+ }

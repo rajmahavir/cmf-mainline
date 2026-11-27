@@ -1,0 +1,8 @@
+[Unit]
+Description=CMF phone crash-log receiver (UDP 5514 kmsg, 5515 journal)
+[Service]
+ExecStart=/usr/bin/python3 %h/cmf-phone-log/receiver.py
+Restart=always
+RestartSec=2
+[Install]
+WantedBy=default.target

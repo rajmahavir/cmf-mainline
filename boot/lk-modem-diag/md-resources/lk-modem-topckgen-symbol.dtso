@@ -1,0 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+&{/__symbols__} {
+	cmf_md_topckgen = "/soc@0/syscon@10000000";
+};

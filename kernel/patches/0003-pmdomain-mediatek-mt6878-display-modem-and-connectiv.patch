@@ -1,0 +1,3061 @@
+From 6d232450848af1722622e5b2004c999442ce842c Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:09 +0000
+Subject: [PATCH 03/13] pmdomain: mediatek: mt6878: display, modem and
+ connectivity power domains
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ drivers/pmdomain/mediatek/Makefile            |   1 +
+ drivers/pmdomain/mediatek/mt6878-disp-iommu.c | 423 ++++++++
+ .../mediatek/mt6878-display-pm-domains.h      |  63 ++
+ drivers/pmdomain/mediatek/mt6878-pm-domains.h |  54 +
+ drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c  | 861 ++++++++++++++--
+ drivers/pmdomain/mediatek/mtk-pm-domains.c    | 956 +++++++++++++++++-
+ drivers/pmdomain/mediatek/mtk-pm-domains.h    |  13 +
+ 7 files changed, 2288 insertions(+), 83 deletions(-)
+ create mode 100644 drivers/pmdomain/mediatek/mt6878-disp-iommu.c
+ create mode 100644 drivers/pmdomain/mediatek/mt6878-display-pm-domains.h
+ create mode 100644 drivers/pmdomain/mediatek/mt6878-pm-domains.h
+
+diff --git a/drivers/pmdomain/mediatek/Makefile b/drivers/pmdomain/mediatek/Makefile
+index b424f1ed8..3c8a76317 100644
+--- a/drivers/pmdomain/mediatek/Makefile
++++ b/drivers/pmdomain/mediatek/Makefile
+@@ -2,6 +2,7 @@
+ obj-$(CONFIG_MTK_MFG_PM_DOMAIN)		+= mtk-mfg-pmdomain.o
+ obj-$(CONFIG_MTK_SCPSYS)		+= mtk-scpsys.o
+ obj-$(CONFIG_MTK_SCPSYS_PM_DOMAINS) 	+= mtk-pm-domains.o
++obj-$(CONFIG_MTK_SCPSYS_PM_DOMAINS)	+= mt6878-disp-iommu.o
+ obj-$(CONFIG_AIROHA_CPU_PM_DOMAIN) 	+= airoha-cpu-pmdomain.o
+ 
+ ifeq ($(CONFIG_THUMB2_KERNEL)$(CONFIG_CC_IS_CLANG),yy)
+diff --git a/drivers/pmdomain/mediatek/mt6878-disp-iommu.c b/drivers/pmdomain/mediatek/mt6878-disp-iommu.c
+new file mode 100644
+index 000000000..072eb3025
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6878-disp-iommu.c
+@@ -0,0 +1,423 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MT6878 (CMF Phone 1) native display: translated scanout and the
++ * display-VA firmware step after DISP power-on (Stage 86).
++ *
++ * Built from the v2 boot module verified on hardware (Stages 51-52, 86 trial):
++ *   attach (once, after the native CRTC's first enable): identity table for the
++ *   native scanout pool, SECURE_BANK_INIT, CMDQ_ENABLE_DISP_VA, bank 0 under
++ *   GenieZone Type 2 (PT_BASE written once), larb0 port 2 MMU_EN, fault watch.
++ *   reapply (after every real DISP power-on): CMDQ_ENABLE_DISP_VA and port 2
++ *   MMU_EN, as the vendor driver does on every CRTC enable. The firmware
++ *   program re-opens the MMSYS crossbar (security 0xa00-0xa08) that a DISP
++ *   power cycle locks, and makes larb ports secure, which needs translation.
++ */
++#include <linux/arm-smccc.h>
++#include <linux/bitfield.h>
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/io-pgtable.h>
++#include <linux/iommu.h>
++#include <linux/iopoll.h>
++#include <linux/irqflags.h>
++#include <linux/ktime.h>
++#include <linux/mm.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/platform_device.h>
++#include <linux/sizes.h>
++#include <linux/workqueue.h>
++#include <linux/soc/mediatek/mt6878-disp-iommu.h>
++
++#define MMINFRA_CFG_BASE	0x1e800000
++#define MMINFRA_CG0_STA		0x100
++#define  CG_GCE_D		BIT(0)
++
++#define BANK0_BASE		0x1e802000
++#define REG_PT_BASE		0x000
++#define REG_INVALIDATE		0x020
++#define  F_INV_RANGE		BIT(0)
++#define  F_ALL_INVLD		BIT(1)
++#define REG_INV_SEL		0x02c
++#define  F_INVLD_EN		(BIT(0) | BIT(1))
++#define REG_CTRL		0x110
++#define  F_SYNC_INVLDT_EN	BIT(3)
++#define REG_CPE_DONE		0x12c
++#define REG_FAULT_ST0		0x130
++#define REG_FAULT_ST1		0x134
++#define REG_MMU0_FAULT_VA	0x13c
++#define REG_MMU0_INT_ID		0x150
++#define L2_FAULTS		(BIT(0) | BIT(1) | BIT(5) | BIT(6))
++#define MAIN_FAULTS		(GENMASK(5, 0) | GENMASK(12, 7))
++#define FW_PT_BASE		0xc0000007
++
++#define LARB0_BASE		0x1401e000
++#define LARB_NONSEC_CON(p)	(0x380 + (p) * 4)
++#define  F_MMU_EN		BIT(0)
++#define RDMA0_PORT		2
++
++#define OVL0_BASE		0x14002000
++#define OVL_L0_PITCH		0x044
++#define OVL_L0_ADDR		0xf40
++
++#define GCED_BASE		0x1e980000
++#define GCE_SYNC_TOKEN_ID	0x60
++#define GCE_SYNC_TOKEN_VAL	0x64
++#define GCE_SYNC_TOKEN_UPD	0x68
++#define  TOKEN_UPD_SET		BIT(16)
++#define T29_ENABLE		(0x100 + 29 * 0x80 + 0x04)
++#define TOKEN_START		0x2b4
++#define TOKEN_END		0x2b5
++
++#define MTK_IOMMU_SECURE_CONTROL	0xC2000514
++#define SECBANK_INIT_DISP		0x400
++#define MTK_SIP_CMDQ_CONTROL		0xC2000518
++#define CMDQ_ENABLE_DISP_VA		1
++#define HYP_TYPE2_EN		0xBB00FFA4
++#define HYP_REG_REGION		0xBB00FFA5
++#define HYP_IOVA_TO_PHYS	0xBB00FFA6
++#define HYP_TYPE2_INV		0xBB00FFA7
++#define HYP_TABLE		0
++#define TLB_ADDR(a)		((lower_32_bits(a) & GENMASK(31, 12)) | upper_32_bits(a))
++
++/* mblock-15-framebuffer in the live DT. */
++static unsigned long pool_base = 0xf5000000;	/* native-scanout pool */
++module_param(pool_base, ulong, 0400);
++static unsigned long pool_size = 0x04000000;
++module_param(pool_size, ulong, 0400);
++static int watch_ms = 2000;
++module_param(watch_ms, int, 0400);
++static int dry_run;
++module_param(dry_run, int, 0400);
++MODULE_PARM_DESC(dry_run, "1: phase A only, change nothing");
++
++static const struct {
++	u64 base, size;
++} regions[] = {
++	{ 0x108000000ULL, SZ_64M },		/* CCU0 */
++	{ 0x10c000000ULL, SZ_64M },		/* CCU1 */
++	{ 0x110000000ULL, 0x60000000ULL },	/* VDO_UP */
++};
++
++static void __iomem *cfg, *bank, *larb, *ovl, *gce;
++static struct io_pgtable_ops *ops;
++static bool attached;			/* set once RDMA0 is translated (PASS) */
++
++static unsigned long smc(unsigned long id, unsigned long a1, unsigned long a2,
++			 unsigned long a3)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(id, a1, a2, a3, 0, 0, 0, 0, &res);
++	return res.a0;
++}
++
++static void snapshot(const char *when)
++{
++	pr_info("cmf-dispiommu: %s pt=%#x ctrl=%#x st0=%#x st1=%#x va=%#x id=%#x port2=%#x ovl=%#x\n",
++		when, readl(bank + REG_PT_BASE), readl(bank + REG_CTRL),
++		readl(bank + REG_FAULT_ST0), readl(bank + REG_FAULT_ST1),
++		readl(bank + REG_MMU0_FAULT_VA), readl(bank + REG_MMU0_INT_ID),
++		readl(larb + LARB_NONSEC_CON(RDMA0_PORT)), readl(ovl + OVL_L0_ADDR));
++}
++
++static bool faults(void)
++{
++	return (readl(bank + REG_FAULT_ST0) & L2_FAULTS) ||
++	       (readl(bank + REG_FAULT_ST1) & MAIN_FAULTS);
++}
++
++static u32 token(u16 id)
++{
++	unsigned long flags;
++	u32 saved, val;
++
++	local_irq_save(flags);
++	saved = readl(gce + GCE_SYNC_TOKEN_ID);
++	writel(id, gce + GCE_SYNC_TOKEN_ID);
++	val = readl(gce + GCE_SYNC_TOKEN_VAL);
++	writel(saved, gce + GCE_SYNC_TOKEN_ID);
++	local_irq_restore(flags);
++	return val;
++}
++
++/* Microseconds until 0x2b5 is set, or -1 after ms. */
++static s64 wait_end(int ms)
++{
++	ktime_t t0 = ktime_get();
++
++	do {
++		if (token(TOKEN_END))
++			return ktime_us_delta(ktime_get(), t0);
++		udelay(50);
++	} while (ktime_ms_delta(ktime_get(), t0) < ms);
++	return -1;
++}
++
++static int invalidate(void)
++{
++	u32 done;
++	int ret;
++
++	writel(0, bank + REG_CPE_DONE);
++	if (readl(bank + REG_CPE_DONE))
++		return -EIO;
++	writel(F_INVLD_EN, bank + REG_INV_SEL);
++	writel(F_ALL_INVLD, bank + REG_INVALIDATE);
++	ret = readl_poll_timeout_atomic(bank + REG_CPE_DONE, done, done, 10, 1000);
++	if (ret)
++		return ret;
++	writel(0, bank + REG_CPE_DONE);
++	return readl(bank + REG_CPE_DONE) ? -EIO : 0;
++}
++
++static int sync_range(unsigned long iova, size_t size)
++{
++	unsigned long r = smc(HYP_TYPE2_INV, TLB_ADDR(iova), TLB_ADDR(iova + size - 1), HYP_TABLE);
++
++	return r ? -EIO : invalidate();
++}
++
++static u64 ns_lookup(unsigned long iova)
++{
++	unsigned long a0 = smc(HYP_IOVA_TO_PHYS, lower_32_bits((u64)iova),
++			       upper_32_bits((u64)iova), HYP_TABLE);
++	u32 ns = a0 & 0xffffffff;
++
++	return ((u64)FIELD_GET(GENMASK(2, 0), ns) << 32) | (ns & GENMASK(31, 12));
++}
++
++static void set_port(bool translated)
++{
++	u32 v = readl(larb + LARB_NONSEC_CON(RDMA0_PORT));
++
++	writel(translated ? v | F_MMU_EN : v & ~F_MMU_EN, larb + LARB_NONSEC_CON(RDMA0_PORT));
++}
++
++static int map_identity(unsigned long iova, phys_addr_t pa, size_t size)
++{
++	size_t mapped, off;
++	int ret;
++
++	for (off = 0; off < size; off += SZ_4K) {
++		mapped = 0;
++		ret = ops->map_pages(ops, iova + off, pa + off, SZ_4K, 1,
++				     IOMMU_READ | IOMMU_WRITE, GFP_KERNEL, &mapped);
++		if (ret || mapped != SZ_4K)
++			return ret ? ret : -EIO;
++	}
++	return 0;
++}
++
++static const char *run(struct device *dev)
++{
++	struct io_pgtable_cfg pcfg = {
++		.quirks = IO_PGTABLE_QUIRK_ARM_NS | IO_PGTABLE_QUIRK_NO_PERMS |
++			  IO_PGTABLE_QUIRK_ARM_MTK_EXT | IO_PGTABLE_QUIRK_ARM_MTK_TTBR_EXT,
++		.pgsize_bitmap = SZ_4K,
++		.ias = 34,
++		.oas = 35,
++		.coherent_walk = true,
++		.iommu_dev = dev,
++	};
++	unsigned long r[ARRAY_SIZE(regions)];
++	unsigned long secbank, dispva;
++	u32 addr, pitch, live, ctrl, t2b4, t2b5;
++	s64 us, us_trig = -1;
++	bool triggered = false;
++	unsigned int i;
++	int ret;
++
++	/* A. Checks and the Linux table; nothing outside Linux memory changes. */
++	if (smc(HYP_TYPE2_EN, 0, 0, 0) != 1)
++		return "SKIP: GenieZone Type 2 not reported";
++	if (readl(cfg + MMINFRA_CG0_STA) & CG_GCE_D)
++		return "SKIP: GCE-D core clock gated";
++	snapshot("before");
++	addr = readl(ovl + OVL_L0_ADDR);
++	pitch = readl(ovl + OVL_L0_PITCH) & 0xffff;
++	if (pool_base + pool_size > SZ_4G || (pool_base | pool_size) & (SZ_4K - 1) ||
++	    addr < pool_base || addr >= pool_base + pool_size || !pitch)
++		return "SKIP: scanout address outside the framebuffer pool";
++	if (readl(bank + REG_PT_BASE) != FW_PT_BASE)
++		return "SKIP: bank 0 not on the firmware table";
++	if (faults() || (readl(larb + LARB_NONSEC_CON(RDMA0_PORT)) & F_MMU_EN) ||
++	    (readl(bank + REG_INVALIDATE) & (F_ALL_INVLD | F_INV_RANGE)))
++		return "SKIP: bank 0 fault, busy invalidate or RDMA0 already translated";
++	if (readl(gce + T29_ENABLE))
++		return "SKIP: thread 29 already enabled";
++	ops = alloc_io_pgtable_ops(ARM_V7S, &pcfg, NULL);
++	if (!ops)
++		return "SKIP: page table allocation failed";
++	ret = map_identity(pool_base, pool_base, pool_size);
++	if (ret)
++		return "SKIP: identity map failed";
++	pr_info("cmf-dispiommu: table ttbr=%#x, %lu pages, scanout %#x\n",
++		pcfg.arm_v7s_cfg.ttbr, pool_size >> 12, addr);
++	if (dry_run)
++		return "SKIP: dry run, phase A passed";
++
++	/* B. Token reset and secure bank init. Screen unaffected. */
++	writel(TOKEN_START, gce + GCE_SYNC_TOKEN_UPD);
++	writel(TOKEN_END, gce + GCE_SYNC_TOKEN_UPD);
++	secbank = smc(MTK_IOMMU_SECURE_CONTROL, SECBANK_INIT_DISP, 0, 0);
++	pr_info("cmf-dispiommu: SECURE_BANK_INIT a0=%#lx\n", secbank);
++	if (secbank)
++		return "SKIP: SECURE_BANK_INIT failed; display unchanged";
++
++	/* C + D back to back: no logging pauses until RDMA0 is translated. */
++	dispva = smc(MTK_SIP_CMDQ_CONTROL, CMDQ_ENABLE_DISP_VA, 0, 0);
++	us = wait_end(20);
++	if (us < 0 && !token(TOKEN_START)) {
++		writel(TOKEN_UPD_SET | TOKEN_START, gce + GCE_SYNC_TOKEN_UPD);
++		triggered = true;
++		us_trig = wait_end(100);
++	}
++	t2b4 = token(TOKEN_START);
++	t2b5 = token(TOKEN_END);
++	if (!t2b5) {
++		pr_info("cmf-dispiommu: DISP_VA a0=%#lx triggered=%d 0x2b4=%#x 0x2b5=%#x\n",
++			dispva, triggered, t2b4, t2b5);
++		return "FAIL: display-VA program did not complete; RDMA0 left in bypass";
++	}
++	for (i = 0; i < ARRAY_SIZE(regions); i++)
++		r[i] = smc(HYP_REG_REGION, regions[i].base >> 12, regions[i].size >> 12,
++			   HYP_TABLE);
++	ctrl = readl(bank + REG_CTRL);
++	writel(ctrl | F_SYNC_INVLDT_EN, bank + REG_CTRL);
++	writel(pcfg.arm_v7s_cfg.ttbr, bank + REG_PT_BASE);	/* the only PT_BASE write */
++	live = readl(bank + REG_PT_BASE);
++	ret = live ? sync_range(pool_base, pool_size) : -EIO;
++	if (!ret && !faults() &&
++	    ns_lookup(pool_base) == pool_base &&
++	    ns_lookup(addr & ~0xfffU) == (addr & ~0xfffU) &&
++	    ns_lookup(pool_base + pool_size - SZ_4K) == pool_base + pool_size - SZ_4K)
++		set_port(true);
++	else
++		ret = ret ? ret : -EIO;
++
++	/* Log what happened, now that the picture is back (or not). */
++	pr_info("cmf-dispiommu: DISP_VA a0=%#lx 0x2b5 after %lld us%s%lld us, 0x2b4=%#x\n",
++		dispva, us, triggered ? ", trigger " : ", trigger -", us_trig, t2b4);
++	pr_info("cmf-dispiommu: regions %#lx %#lx %#lx, ttbr %#x -> %#x, sync %d\n",
++		r[0], r[1], r[2], pcfg.arm_v7s_cfg.ttbr, live, ret);
++	snapshot("translated");
++	if (ret || r[0] || r[1] || r[2])
++		return "FAIL: bank 0 attach or GenieZone mirror check failed; screen black until reboot";
++
++	/* E. Watch for faults. */
++	for (i = 0; i < watch_ms; i += 50) {
++		if (faults()) {
++			set_port(false);
++			snapshot("fault");
++			return "FAIL: bank 0 fault; RDMA0 returned to bypass (screen black until reboot)";
++		}
++		msleep(50);
++	}
++	snapshot("final");
++	attached = true;
++	return "PASS: RDMA0 translated through bank 0";
++}
++
++static bool enable = true;
++module_param(enable, bool, 0444);
++MODULE_PARM_DESC(enable, "Switch native scanout to translated (bank 0) after the first CRTC enable");
++
++static DEFINE_MUTEX(state_lock);
++static unsigned long attach_once;
++
++static void attach_work_fn(struct work_struct *work)
++{
++	struct platform_device *pdev;
++	const char *result;
++
++	if (!enable) {
++		pr_info("cmf-dispiommu: SKIP: disabled (mt6878_disp_iommu.enable=0)\n");
++		return;
++	}
++	cfg = ioremap(MMINFRA_CFG_BASE, SZ_4K);
++	bank = ioremap(BANK0_BASE, SZ_4K);
++	larb = ioremap(LARB0_BASE, SZ_4K);
++	ovl = ioremap(OVL0_BASE, SZ_4K);
++	gce = ioremap(GCED_BASE, 0x4000);
++	if (!cfg || !bank || !larb || !ovl || !gce) {
++		pr_err("cmf-dispiommu: SKIP: ioremap failed\n");
++		return;
++	}
++	pdev = platform_device_register_simple("mt6878-disp-iommu", -1, NULL, 0);
++	if (IS_ERR(pdev)) {
++		pr_err("cmf-dispiommu: SKIP: device registration failed\n");
++		return;
++	}
++	mutex_lock(&state_lock);
++	result = run(&pdev->dev);
++	mutex_unlock(&state_lock);
++	pr_info("cmf-dispiommu: %s\n", result);
++}
++static DECLARE_DELAYED_WORK(attach_work, attach_work_fn);
++
++/* Called by the native CRTC after a successful enable; acts once per boot. */
++void mt6878_disp_iommu_schedule_attach(void)
++{
++	if (test_and_set_bit(0, &attach_once))
++		return;
++	schedule_delayed_work(&attach_work, msecs_to_jiffies(3000));
++}
++EXPORT_SYMBOL_GPL(mt6878_disp_iommu_schedule_attach);
++
++bool mt6878_disp_iommu_attached(void)
++{
++	return READ_ONCE(attached);
++}
++EXPORT_SYMBOL_GPL(mt6878_disp_iommu_attached);
++
++/*
++ * After a real DISP power-on: re-run the firmware display-VA program and
++ * re-translate RDMA0. Bank 0 (MM_INFRA) keeps the Linux table across the
++ * DISP cycle. No-op unless attached. Process context; may wait ~120 ms.
++ */
++int mt6878_disp_iommu_reapply(void)
++{
++	unsigned long dispva;
++	s64 us, us_trig = -1;
++	bool triggered = false;
++	int ret = 0;
++
++	if (!READ_ONCE(attached))
++		return 0;
++	mutex_lock(&state_lock);
++	if (readl(cfg + MMINFRA_CG0_STA) & CG_GCE_D) {
++		ret = -EHOSTDOWN;
++		goto out;
++	}
++	if (readl(gce + T29_ENABLE)) {
++		ret = -EBUSY;
++		goto out;
++	}
++	writel(TOKEN_START, gce + GCE_SYNC_TOKEN_UPD);
++	writel(TOKEN_END, gce + GCE_SYNC_TOKEN_UPD);
++	dispva = smc(MTK_SIP_CMDQ_CONTROL, CMDQ_ENABLE_DISP_VA, 0, 0);
++	us = wait_end(20);
++	if (us < 0 && !token(TOKEN_START)) {
++		writel(TOKEN_UPD_SET | TOKEN_START, gce + GCE_SYNC_TOKEN_UPD);
++		triggered = true;
++		us_trig = wait_end(100);
++	}
++	if (token(TOKEN_END))
++		set_port(true);
++	else
++		ret = -ETIMEDOUT;
++	pr_info("cmf-dispiommu: reapply DISP_VA a0=%#lx end %lld us, trigger=%d %lld us, port2=%#x faults=%d ret=%d\n",
++		dispva, us, triggered, us_trig, readl(larb + LARB_NONSEC_CON(RDMA0_PORT)),
++		faults(), ret);
++out:
++	mutex_unlock(&state_lock);
++	if (ret)
++		pr_err("cmf-dispiommu: reapply failed: %d\n", ret);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_disp_iommu_reapply);
++
++MODULE_DESCRIPTION("MT6878 native translated scanout and display-VA after DISP power-on");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/pmdomain/mediatek/mt6878-display-pm-domains.h b/drivers/pmdomain/mediatek/mt6878-display-pm-domains.h
+new file mode 100644
+index 000000000..9b0deb322
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6878-display-pm-domains.h
+@@ -0,0 +1,63 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* MT6878 display hierarchy from MediaTek's mtk-scpsys-mt6878.c. */
++#ifndef __PMDOMAIN_MEDIATEK_MT6878_DISPLAY_PM_DOMAINS_H
++#define __PMDOMAIN_MEDIATEK_MT6878_DISPLAY_PM_DOMAINS_H
++
++#include <dt-bindings/power/mediatek,mt6878-power.h>
++#include "mtk-pm-domains.h"
++
++static const struct scpsys_domain_data mt6878_display_domains[] = {
++	[MT6878_POWER_DOMAIN_DISP] = {
++		.name = "disp",
++		.ctl_offs = 0x0e70,
++		.pwr_sta_offs = 0x0e70,
++		.pwr_sta2nd_offs = 0x0e70,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.min_subsys_clks = 2,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF | MTK_SCPD_REQUIRE_OFF,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA, BIT(0) | BIT(1) | BIT(18),
++					0x0c14, 0x0c18, 0x0c1c),
++		},
++	},
++};
++
++static const struct scpsys_hwv_domain_data mt6878_display_hwv_domains[] = {
++	[MT6878_POWER_DOMAIN_MM_INFRA] = {
++		.name = "mm-infra",
++		.set = 0x0198,
++		.clr = 0x019c,
++		.done = 0x141c,
++		.en = 0x1410,
++		.set_sta = 0x146c,
++		.clr_sta = 0x1470,
++		.setclr_bit = 0,
++		.sta_bit = 0,
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF | MTK_SCPD_REQUIRE_OFF,
++	},
++};
++
++static const struct scpsys_domain_parent mt6878_display_parents[] = {
++	{ MT6878_POWER_DOMAIN_MM_INFRA, MT6878_POWER_DOMAIN_DISP },
++};
++
++static enum scpsys_bus_prot_block mt6878_display_bus_prot_blocks[] = {
++	BUS_PROT_BLOCK_INFRA,
++};
++
++static const struct scpsys_soc_data mt6878_display_scpsys_data = {
++	.domains_data = mt6878_display_domains,
++	.num_domains = ARRAY_SIZE(mt6878_display_domains),
++	.hwv_domains_data = mt6878_display_hwv_domains,
++	.num_hwv_domains = ARRAY_SIZE(mt6878_display_hwv_domains),
++	.bus_prot_blocks = mt6878_display_bus_prot_blocks,
++	.num_bus_prot_blocks = ARRAY_SIZE(mt6878_display_bus_prot_blocks),
++	.type = SCPSYS_MTCMOS_TYPE_MIXED,
++	.parents = mt6878_display_parents,
++	.num_parents = ARRAY_SIZE(mt6878_display_parents),
++};
++
++#endif /* __PMDOMAIN_MEDIATEK_MT6878_DISPLAY_PM_DOMAINS_H */
+diff --git a/drivers/pmdomain/mediatek/mt6878-pm-domains.h b/drivers/pmdomain/mediatek/mt6878-pm-domains.h
+new file mode 100644
+index 000000000..6dc8c957a
+--- /dev/null
++++ b/drivers/pmdomain/mediatek/mt6878-pm-domains.h
+@@ -0,0 +1,54 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* MT6878 connectivity domain data from MediaTek's mtk-scpsys-mt6878.c. */
++#ifndef __PMDOMAIN_MEDIATEK_MT6878_PM_DOMAINS_H
++#define __PMDOMAIN_MEDIATEK_MT6878_PM_DOMAINS_H
++
++#include <dt-bindings/power/mediatek,mt6878-power.h>
++#include "mtk-pm-domains.h"
++
++#define MT6878_CONN_PWR_CON 0x0e04
++
++static const struct scpsys_domain_data mt6878_domains[] = {
++	[MT6878_POWER_DOMAIN_CONN] = {
++		.name = "conn",
++		.ctl_offs = MT6878_CONN_PWR_CON,
++		.pwr_sta_offs = MT6878_CONN_PWR_CON,
++		.pwr_sta2nd_offs = MT6878_CONN_PWR_CON,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.caps = MTK_SCPD_KEEP_DEFAULT_OFF,
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA, BIT(1), 0x0c94, 0x0c98, 0x0c9c),
++			BUS_PROT_WR_IGN(INFRA, BIT(12), 0x0c54, 0x0c58, 0x0c5c),
++			BUS_PROT_WR_IGN(INFRA, BIT(0), 0x0c94, 0x0c98, 0x0c9c),
++			BUS_PROT_WR_IGN(INFRA, BIT(8), 0x0c44, 0x0c48, 0x0c4c),
++		},
++	},
++	[MT6878_POWER_DOMAIN_AUDIO] = {
++		.name = "audio",
++		.ctl_offs = 0x0e18,
++		.pwr_sta_offs = 0x0e18,
++		.pwr_sta2nd_offs = 0x0e18,
++		.sta_mask = BIT(30),
++		.sta2nd_mask = BIT(31),
++		.sram_pdn_bits = BIT(8),
++		.sram_pdn_ack_bits = BIT(12),
++		.bp_cfg = {
++			BUS_PROT_WR_IGN(INFRA, BIT(6), 0x0c84, 0x0c88, 0x0c8c),
++		},
++	},
++};
++
++static enum scpsys_bus_prot_block mt6878_bus_prot_blocks[] = {
++	BUS_PROT_BLOCK_INFRA,
++};
++
++static const struct scpsys_soc_data mt6878_scpsys_data = {
++	.domains_data = mt6878_domains,
++	.num_domains = ARRAY_SIZE(mt6878_domains),
++	.bus_prot_blocks = mt6878_bus_prot_blocks,
++	.num_bus_prot_blocks = ARRAY_SIZE(mt6878_bus_prot_blocks),
++	.type = SCPSYS_MTCMOS_TYPE_DIRECT_CTL,
++};
++
++#endif
+diff --git a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+index 9a8a38d98..a7a42bf8f 100644
+--- a/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
++++ b/drivers/pmdomain/mediatek/mtk-mfg-pmdomain.c
+@@ -10,9 +10,11 @@
+ #include <linux/clk-provider.h>
+ #include <linux/container_of.h>
+ #include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
+ #include <linux/nvmem-provider.h>
+ #include <linux/mailbox_client.h>
+ #include <linux/module.h>
++#include <linux/mutex.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+ #include <linux/of_platform.h>
+@@ -21,8 +23,13 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_opp.h>
++#include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
++#include <linux/spinlock.h>
++#include <linux/string_choices.h>
++#include <linux/thermal.h>
+ #include <linux/units.h>
++#include <linux/workqueue.h>
+ 
+ #define GPR_LP_STATE		0x0028
+ #define   EB_ON_SUSPEND		0x0
+@@ -125,6 +132,20 @@
+ #define GF_REG_LIMIT_TABLE		0x1d54
+ #define GF_REG_GPM3_TABLE		0x223C
+ 
++/*
++ * MT6878 layout of the GPUFreq shared status, which differs from the MT8196
++ * one past GF_REG_LEAKAGE_HT_SRAM: there are no VOLT_DAC_LOW fields.
++ */
++#define MT6878_GF_REG_PWR_CTL		0x00C4
++#define MT6878_GF_REG_SHADER_PRESENT	0x00D0
++#define MT6878_GF_REG_OPP_TABLE_GPU	0x03EC
++#define MT6878_GF_REG_OPP_TABLE_STK	0x0A7C
++/* the GPUFreq part at the start of the GPUEB carveout, as in "gpueb-mem-table" */
++#define MT6878_GF_MEM_SIZE		0x4000
++
++/* SPM (scpsys) power control register of the MFG0 domain, which holds the EB */
++#define MT6878_SPM_MFG0_PWR_CON		0x0EB4
++
+ #define MFG_MT8196_E2_ID		0x101
+ #define GPUEB_SLEEP_MAGIC		0x55667788UL
+ #define GPUEB_MEM_MAGIC			0xBABADADAUL
+@@ -136,6 +157,30 @@
+ 
+ #define GPUEB_MBOX_MAX_RX_SIZE		32 /* in bytes */
+ 
++/*
++ * How long to wait for a GPUFreq reply. Downstream waits 10 s (IPI_TIMEOUT_MS)
++ * and then gives up on the GPU; a power request can take longer than the usual
++ * few ms, so log the ones that are slow.
++ */
++#define GPUFREQ_IPI_TIMEOUT_MS		10000
++#define GPUFREQ_IPI_SLOW_MS		500
++/* how often a power request looks at the EB's power count while it waits */
++#define GPUFREQ_PWR_POLL_MS		10
++
++/* how far the EB power count may be off before its reply is taken as an error */
++#define GPUFREQ_PWR_COUNT_SLACK		4
++
++/*
++ * When the OPP could not be restored on power-on, try again this often, this
++ * many times. Genpd, the OPP core and devfreq all skip a request for the state
++ * they believe is set, so nothing else would send it again.
++ */
++#define GPUFREQ_PERF_RETRY_MS		20
++#define GPUFREQ_PERF_RETRIES		10
++
++/* no command outstanding on the GPUFreq channel */
++#define GPUFREQ_NO_CMD			(-1)
++
+ /*
+  * This enum is part of the ABI of the GPUEB firmware. Don't change the
+  * numbering, as you would wreak havoc.
+@@ -163,6 +208,9 @@ enum mtk_mfg_ipi_cmd {
+ 	CMD_NUM				= 19,
+ };
+ 
++/* GPUFreq IPI targets, for single-target commands such as CMD_COMMIT */
++#define GF_TARGET_GPU			1
++
+ /*
+  * This struct is part of the ABI of the GPUEB firmware. Changing it, or
+  * reordering fields in it, will break things, so don't do it. Thank you.
+@@ -245,12 +293,35 @@ struct mtk_mfg_opp_entry {
+ 	__le32 power_mw;
+ } __packed;
+ 
++/**
++ * struct mtk_mfg_mbox - one mailbox channel to the EB
++ * @cl: mailbox client
++ * @rx_done: completed when a reply was taken into @rx_data
++ * @mfg: driver instance
++ * @ch: mailbox channel
++ * @tx_data: message being sent, kept off the stack
++ * @rx_data: last reply taken
++ * @lock: protects @rx_data, @expect_cmd and @stale_cmd against the RX callback
++ * @expect_cmd: command whose reply is waited for, GPUFREQ_NO_CMD if none
++ * @stale_cmd: command that was given up on and may still be answered,
++ *	GPUFREQ_NO_CMD if none
++ * @warned_echo: a reply for another command was taken once already
++ *
++ * The EB echoes the command number in its GPUFreq replies (downstream logs
++ * it as the received command). A reply that arrives after its command was
++ * given up on must not be taken as the reply to the next command.
++ */
+ struct mtk_mfg_mbox {
+ 	struct mbox_client cl;
+ 	struct completion rx_done;
+ 	struct mtk_mfg *mfg;
+ 	struct mbox_chan *ch;
++	void *tx_data;
+ 	void *rx_data;
++	spinlock_t lock;
++	int expect_cmd;
++	int stale_cmd;
++	bool warned_echo;
+ };
+ 
+ struct mtk_mfg {
+@@ -262,12 +333,14 @@ struct mtk_mfg {
+ 	struct clk_hw clk_stack_hw;
+ 	struct regulator_bulk_data *gpu_regs;
+ 	void __iomem *rpc;
++	struct regmap *spm;
+ 	void __iomem *gpr;
+ 	void __iomem *shared_mem;
+ 	phys_addr_t shared_mem_phys;
+ 	unsigned int shared_mem_size;
+ 	u16 ghpm_en_reg;
+ 	u32 ipi_magic;
++	bool gf_ready;
+ 	unsigned short num_gpu_opps;
+ 	unsigned short num_stack_opps;
+ 	struct dev_pm_opp_data *gpu_opps;
+@@ -275,6 +348,34 @@ struct mtk_mfg {
+ 	struct mtk_mfg_mbox *gf_mbox;
+ 	struct mtk_mfg_mbox *slp_mbox;
+ 	const struct mtk_mfg_variant *variant;
++	/* serialises the EB requests of the genpd callbacks and @perf_work */
++	struct mutex lock;
++	/* the GPU is on as far as the EB was asked; under @lock */
++	bool gpu_on;
++	/* performance state last asked for; under @lock */
++	unsigned int perf_state;
++	/* @perf_state could not be applied on power-on; under @lock */
++	bool perf_pending;
++	unsigned int perf_retries;
++	struct delayed_work perf_work;
++};
++
++/**
++ * struct mtk_mfg_gf_layout - offsets in the GPUFreq shared status
++ * @freq_gpu: current GPU frequency in kHz
++ * @freq_stk: current Stack frequency in kHz
++ * @pwr_ctl: whether the EB takes power control requests (0 if not used)
++ * @shader_present: bitmask of the usable shader cores
++ * @opp_table_gpu: start of the working GPU OPP table
++ * @opp_table_stk: start of the working Stack OPP table
++ */
++struct mtk_mfg_gf_layout {
++	u16 freq_gpu;
++	u16 freq_stk;
++	u16 pwr_ctl;
++	u16 shader_present;
++	u16 opp_table_gpu;
++	u16 opp_table_stk;
+ };
+ 
+ struct mtk_mfg_variant {
+@@ -284,9 +385,40 @@ struct mtk_mfg_variant {
+ 	unsigned int num_regulators;
+ 	/** @turbo_below: opp indices below this value are considered turbo */
+ 	unsigned int turbo_below;
++	const struct mtk_mfg_gf_layout *layout;
++	/**
++	 * @eb_fw_managed: the boot firmware loads and starts the EB, which then
++	 * keeps running. The driver can neither power it on nor put it to sleep
++	 * and only switches the GPU through it.
++	 */
++	bool eb_fw_managed;
++	/** @single_buck: one supply for GPU and stacks, OPPs set on the GPU target */
++	bool single_buck;
++	/** @gf_mem_size: size of the GPUFreq part of the shared memory, 0 if all */
++	unsigned int gf_mem_size;
++	/** @shared_mem_compat: compatible of a bootloader-made carveout to fall back to */
++	const char *shared_mem_compat;
+ 	int (*init)(struct mtk_mfg *mfg);
+ };
+ 
++static const struct mtk_mfg_gf_layout mtk_mfg_mt8196_layout = {
++	.freq_gpu = GF_REG_FREQ_OUT_GPU,
++	.freq_stk = GF_REG_FREQ_OUT_STK,
++	.shader_present = GF_REG_SHADER_PRESENT,
++	.opp_table_gpu = GF_REG_OPP_TABLE_GPU,
++	.opp_table_stk = GF_REG_OPP_TABLE_STK,
++};
++
++static const struct mtk_mfg_gf_layout mtk_mfg_mt6878_layout = {
++	/* CON1/fmeter fields are debug snapshots, not live DVFS status. */
++	.freq_gpu = GF_REG_FREQ_CUR_GPU,
++	.freq_stk = GF_REG_FREQ_CUR_STK,
++	.pwr_ctl = MT6878_GF_REG_PWR_CTL,
++	.shader_present = MT6878_GF_REG_SHADER_PRESENT,
++	.opp_table_gpu = MT6878_GF_REG_OPP_TABLE_GPU,
++	.opp_table_stk = MT6878_GF_REG_OPP_TABLE_STK,
++};
++
+ static inline struct mtk_mfg *mtk_mfg_from_genpd(struct generic_pm_domain *pd)
+ {
+ 	return container_of(pd, struct mtk_mfg, pd);
+@@ -299,7 +431,16 @@ static inline void mtk_mfg_update_reg_bits(void __iomem *addr, u32 mask, u32 val
+ 
+ static inline bool mtk_mfg_is_powered_on(struct mtk_mfg *mfg)
+ {
+-	return (readl(mfg->rpc + RPC_PWR_CON) & PWR_ACK_M) == PWR_ACK_M;
++	u32 val;
++
++	if (mfg->variant->eb_fw_managed) {
++		if (regmap_read(mfg->spm, MT6878_SPM_MFG0_PWR_CON, &val))
++			return false;
++	} else {
++		val = readl(mfg->rpc + RPC_PWR_CON);
++	}
++
++	return (val & PWR_ACK_M) == PWR_ACK_M;
+ }
+ 
+ static unsigned long mtk_mfg_recalc_rate_gpu(struct clk_hw *hw,
+@@ -307,7 +448,7 @@ static unsigned long mtk_mfg_recalc_rate_gpu(struct clk_hw *hw,
+ {
+ 	struct mtk_mfg *mfg = container_of(hw, struct mtk_mfg, clk_core_hw);
+ 
+-	return readl(mfg->shared_mem + GF_REG_FREQ_OUT_GPU) * HZ_PER_KHZ;
++	return readl(mfg->shared_mem + mfg->variant->layout->freq_gpu) * HZ_PER_KHZ;
+ }
+ 
+ static int mtk_mfg_determine_rate(struct clk_hw *hw,
+@@ -334,7 +475,7 @@ static unsigned long mtk_mfg_recalc_rate_stack(struct clk_hw *hw,
+ {
+ 	struct mtk_mfg *mfg = container_of(hw, struct mtk_mfg, clk_stack_hw);
+ 
+-	return readl(mfg->shared_mem + GF_REG_FREQ_OUT_STK) * HZ_PER_KHZ;
++	return readl(mfg->shared_mem + mfg->variant->layout->freq_stk) * HZ_PER_KHZ;
+ }
+ 
+ static const struct clk_ops mtk_mfg_clk_gpu_ops = {
+@@ -372,6 +513,15 @@ static int mtk_mfg_eb_on(struct mtk_mfg *mfg)
+ 	if (mtk_mfg_is_powered_on(mfg))
+ 		return 0;
+ 
++	/*
++	 * An EB the firmware manages can't be started from here. Its SRAM is
++	 * in the domain that is down, so don't touch anything behind it.
++	 */
++	if (mfg->variant->eb_fw_managed) {
++		dev_err(dev, "EB is not running\n");
++		return -ENODEV;
++	}
++
+ 	ret = readl_poll_timeout(mfg->rpc + RPC_GHPM_RO0_CON, val,
+ 				 !(val & (GHPM_PWR_STATE_M | GHPM_STATE_M)),
+ 				 GPUEB_POLL_US, GPUEB_TIMEOUT_US);
+@@ -421,6 +571,10 @@ static int mtk_mfg_eb_off(struct mtk_mfg *mfg)
+ 	u32 val;
+ 	int ret;
+ 
++	/* stays up for the GPU to be switched on again */
++	if (mfg->variant->eb_fw_managed)
++		return 0;
++
+ 	ret = mbox_send_message(mfg->slp_mbox->ch, &msg);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Cannot send sleep command: %pe\n", ERR_PTR(ret));
+@@ -439,39 +593,132 @@ static int mtk_mfg_eb_off(struct mtk_mfg *mfg)
+ 	return 0;
+ }
+ 
++/*
++ * End the wait for the outstanding GPUFreq reply. With @gave_up, the reply
++ * may still come: remember its command so the RX callback drops it.
++ */
++static void mtk_mfg_ipi_done(struct mtk_mfg *mfg, bool gave_up)
++{
++	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
++	unsigned long flags;
++
++	spin_lock_irqsave(&gf->lock, flags);
++	if (gave_up)
++		gf->stale_cmd = gf->expect_cmd;
++	gf->expect_cmd = GPUFREQ_NO_CMD;
++	spin_unlock_irqrestore(&gf->lock, flags);
++}
++
+ /**
+- * mtk_mfg_send_ipi - synchronously send an IPI message on the gpufreq channel
++ * __mtk_mfg_send_ipi - synchronously send an IPI message on the gpufreq channel
+  * @mfg: pointer to this driver instance's private &struct mtk_mfg
+- * @msg: pointer to a message to send; will have magic filled and response assigned
++ * @msg: pointer to a message to send; will have magic filled and response copied
+  *
+  * Send an IPI message on the gpufreq channel, and wait for a response. Once a
+- * response is received, assign a pointer to the response buffer (valid until
+- * next response is received) to @msg.
++ * response is received, copy it into @msg, whatever its return value.
+  *
+  * Returns 0 on success, negative errno on failure.
+  */
+-static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
++static int mtk_mfg_ipi_send(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
+ {
++	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
+ 	struct device *dev = &mfg->pdev->dev;
+-	unsigned long wait;
++	unsigned long flags;
+ 	int ret;
+ 
++	BUILD_BUG_ON(sizeof(*msg) > GPUEB_MBOX_MAX_RX_SIZE);
++
+ 	msg->magic = mfg->ipi_magic;
++	dev_dbg(dev, "GPUFreq send cmd=%u target=%u data=%u\n",
++		le32_to_cpu(msg->cmd), le32_to_cpu(msg->target),
++		le32_to_cpu(msg->u.oppidx));
++
++	/*
++	 * The mailbox core holds on to the message until the EB took it, which
++	 * may be after we gave up waiting: don't let it point into our stack.
++	 */
++	memcpy(gf->tx_data, msg, sizeof(*msg));
+ 
+-	ret = mbox_send_message(mfg->gf_mbox->ch, msg);
++	/* a reply that came after an earlier timeout isn't the answer to this */
++	spin_lock_irqsave(&gf->lock, flags);
++	reinit_completion(&gf->rx_done);
++	gf->expect_cmd = le32_to_cpu(msg->cmd);
++	spin_unlock_irqrestore(&gf->lock, flags);
++
++	ret = mbox_send_message(gf->ch, gf->tx_data);
+ 	if (ret < 0) {
+ 		dev_err(dev, "Cannot send GPUFreq IPI command: %pe\n", ERR_PTR(ret));
++		mtk_mfg_ipi_done(mfg, false);
+ 		return ret;
+ 	}
+ 
+-	wait = wait_for_completion_timeout(&mfg->gf_mbox->rx_done, msecs_to_jiffies(500));
+-	if (!wait)
++	return 0;
++}
++
++/* wait up to @timeout jiffies for the reply to a sent message, copy it into @msg */
++static int mtk_mfg_ipi_wait(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg,
++			    unsigned long timeout)
++{
++	struct mtk_mfg_mbox *gf = mfg->gf_mbox;
++	unsigned long flags;
++
++	if (!wait_for_completion_timeout(&gf->rx_done, timeout))
+ 		return -ETIMEDOUT;
+ 
+-	msg = mfg->gf_mbox->rx_data;
++	spin_lock_irqsave(&gf->lock, flags);
++	memcpy(msg, gf->rx_data, sizeof(*msg));
++	spin_unlock_irqrestore(&gf->lock, flags);
++	dev_dbg(&mfg->pdev->dev, "GPUFreq reply cmd=%u target=%u ret=%d\n",
++		le32_to_cpu(msg->cmd), le32_to_cpu(msg->target),
++		(int)le32_to_cpu(msg->u.return_value));
++
++	return 0;
++}
++
++static int __mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
++{
++	struct device *dev = &mfg->pdev->dev;
++	unsigned long t0 = jiffies;
++	unsigned int ms;
++	int ret;
++
++	ret = mtk_mfg_ipi_send(mfg, msg);
++	if (ret)
++		return ret;
++
++	ret = mtk_mfg_ipi_wait(mfg, msg,
++			       msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS));
++	mtk_mfg_ipi_done(mfg, ret != 0);
++	if (ret) {
++		dev_err(dev, "No reply to GPUFreq IPI command %u\n", le32_to_cpu(msg->cmd));
++		return ret;
++	}
++
++	ms = jiffies_to_msecs(jiffies - t0);
++	if (ms > GPUFREQ_IPI_SLOW_MS)
++		dev_warn(dev, "GPUFreq IPI command %u took %u ms\n",
++			 le32_to_cpu(msg->cmd), ms);
++
++	return 0;
++}
++
++/**
++ * mtk_mfg_send_ipi - synchronously send an IPI message, fail on an error reply
++ * @mfg: pointer to this driver instance's private &struct mtk_mfg
++ * @msg: pointer to a message to send; will have magic filled and response copied
++ *
++ * Returns 0 on success, negative errno on failure.
++ */
++static int mtk_mfg_send_ipi(struct mtk_mfg *mfg, struct mtk_mfg_ipi_msg *msg)
++{
++	int ret;
++
++	ret = __mtk_mfg_send_ipi(mfg, msg);
++	if (ret)
++		return ret;
+ 
+ 	if (msg->u.return_value < 0) {
+-		dev_err(dev, "IPI return: %d\n", msg->u.return_value);
++		dev_err(&mfg->pdev->dev, "IPI return: %d\n", msg->u.return_value);
+ 		return -EPROTO;
+ 	}
+ 
+@@ -503,14 +750,139 @@ static int mtk_mfg_init_shared_mem(struct mtk_mfg *mfg)
+ 	return 0;
+ }
+ 
+-static int mtk_mfg_power_control(struct mtk_mfg *mfg, bool enabled)
++/**
++ * mtk_mfg_power_request - send one GPU power request to the EB
++ * @mfg: pointer to this driver instance's private &struct mtk_mfg
++ * @on: whether to ask for the GPU to be on or off
++ * @count: where to store the EB's power count after the request
++ *
++ * The EB counts power requests, and replies with the new count, or with a
++ * negative errno if switching failed. It also keeps the count in the shared
++ * status, once it is done: when the reply doesn't come, that tells whether
++ * the EB carried out the request regardless.
++ *
++ * Returns 0 if the EB took the request, negative errno otherwise.
++ */
++static int mtk_mfg_power_request(struct mtk_mfg *mfg, bool on, int *count)
+ {
++	struct device *dev = &mfg->pdev->dev;
++	unsigned long end = jiffies + msecs_to_jiffies(GPUFREQ_IPI_TIMEOUT_MS);
+ 	struct mtk_mfg_ipi_msg msg = {};
++	bool stale_same;
++	int before, after;
++	int ret;
++
++	before = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
++	after = before + (on ? 1 : -1);
+ 
+ 	msg.cmd = CMD_POWER_CONTROL;
+-	msg.u.power_state = enabled ? 1 : 0;
++	msg.u.power_state = on ? 1 : 0;
+ 
+-	return mtk_mfg_send_ipi(mfg, &msg);
++	/*
++	 * An earlier power request that was taken as done without its reply
++	 * may be answered now; the reply can't be told apart from this one's
++	 * by its command, only by the count it carries.
++	 */
++	spin_lock_irq(&mfg->gf_mbox->lock);
++	stale_same = mfg->gf_mbox->stale_cmd == CMD_POWER_CONTROL;
++	spin_unlock_irq(&mfg->gf_mbox->lock);
++
++	ret = mtk_mfg_ipi_send(mfg, &msg);
++	if (ret)
++		return ret;
++
++	/*
++	 * Now and then the EB switches the GPU but never replies. Everything
++	 * waiting for the GPU would stall for the whole timeout; its power
++	 * count tells that the request is done, so stop waiting then.
++	 */
++	do {
++		ret = mtk_mfg_ipi_wait(mfg, &msg,
++				       msecs_to_jiffies(GPUFREQ_PWR_POLL_MS));
++		if (!ret) {
++			*count = msg.u.return_value;
++			if (stale_same && *count >= 0 && *count != after) {
++				/* the late reply to the earlier request */
++				dev_dbg(dev, "dropped a late power reply, count %d\n",
++					*count);
++				spin_lock_irq(&mfg->gf_mbox->lock);
++				mfg->gf_mbox->stale_cmd = GPUFREQ_NO_CMD;
++				spin_unlock_irq(&mfg->gf_mbox->lock);
++				stale_same = false;
++				continue;
++			}
++			mtk_mfg_ipi_done(mfg, false);
++			return 0;
++		}
++		*count = readl(mfg->shared_mem + GF_REG_POWER_COUNT);
++		if (*count == after) {
++			dev_dbg(dev, "EB switched the GPU %s without a reply, count %d\n",
++				str_on_off(on), *count);
++			/* its reply may still come: don't take it for the next one's */
++			mtk_mfg_ipi_done(mfg, true);
++			return 0;
++		}
++	} while (time_before(jiffies, end));
++
++	mtk_mfg_ipi_done(mfg, true);
++	dev_err(dev, "No reply to GPUFreq IPI command %u, count %d\n",
++		le32_to_cpu(msg.cmd), *count);
++
++	return -ETIMEDOUT;
++}
++
++static int mtk_mfg_power_control(struct mtk_mfg *mfg, bool enabled)
++{
++	const struct mtk_mfg_gf_layout *l = mfg->variant->layout;
++	struct device *dev = &mfg->pdev->dev;
++	struct mtk_mfg_ipi_msg msg = {};
++	int want = enabled ? 1 : 0;
++	bool on = enabled;
++	int count, i, ret;
++
++	/* the shared status isn't there yet: just send the request */
++	if (!mfg->gf_ready) {
++		msg.cmd = CMD_POWER_CONTROL;
++		msg.u.power_state = enabled ? 1 : 0;
++
++		return mtk_mfg_send_ipi(mfg, &msg);
++	}
++
++	/*
++	 * The EB says in the shared status whether it switches the GPU on
++	 * request. If it doesn't, it keeps the GPU powered by itself.
++	 */
++	if (l->pwr_ctl && !readl(mfg->shared_mem + l->pwr_ctl))
++		return 0;
++
++	/*
++	 * The EB switches the GPU only when its power count goes from 0 to 1
++	 * or from 1 to 0, as downstream's __gpufreq_power_control() does, so
++	 * the count must follow the domain: 1 when on, 0 when off. A request
++	 * whose reply was missed leaves the count one off. Every request after
++	 * it then misses the switch, and the GPU stays in the wrong state for
++	 * good while the domain flips. Step the count back to where it belongs
++	 * instead; the steps in between don't touch the hardware.
++	 */
++	for (i = 0; i <= GPUFREQ_PWR_COUNT_SLACK; i++) {
++		ret = mtk_mfg_power_request(mfg, on, &count);
++		if (ret)
++			return ret;
++
++		if (count == want)
++			return 0;
++
++		if (abs(count - want) > GPUFREQ_PWR_COUNT_SLACK) {
++			dev_err(dev, "IPI return: %d\n", count);
++			return -EPROTO;
++		}
++
++		dev_warn(dev, "EB GPU power count is %d, not %d, correcting\n",
++			 count, want);
++		on = count < want;
++	}
++
++	return -EPROTO;
+ }
+ 
+ static int mtk_mfg_set_oppidx(struct mtk_mfg *mfg, unsigned int opp_idx)
+@@ -521,9 +893,16 @@ static int mtk_mfg_set_oppidx(struct mtk_mfg *mfg, unsigned int opp_idx)
+ 	if (opp_idx >= mfg->num_gpu_opps)
+ 		return -EINVAL;
+ 
+-	msg.cmd = CMD_FIX_DUAL_TARGET_OPPIDX;
+-	msg.u.dual_commit.gpu_oppidx = opp_idx;
+-	msg.u.dual_commit.stack_oppidx = opp_idx;
++	if (mfg->variant->single_buck) {
++		/* the EB derives the Stack OPP from the GPU one */
++		msg.cmd = CMD_COMMIT;
++		msg.target = GF_TARGET_GPU;
++		msg.u.oppidx = opp_idx;
++	} else {
++		msg.cmd = CMD_FIX_DUAL_TARGET_OPPIDX;
++		msg.u.dual_commit.gpu_oppidx = opp_idx;
++		msg.u.dual_commit.stack_oppidx = opp_idx;
++	}
+ 
+ 	ret = mtk_mfg_send_ipi(mfg, &msg);
+ 	if (ret) {
+@@ -537,6 +916,7 @@ static int mtk_mfg_set_oppidx(struct mtk_mfg *mfg, unsigned int opp_idx)
+ 
+ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
+ {
++	const struct mtk_mfg_gf_layout *l = mfg->variant->layout;
+ 	struct device *dev = &mfg->pdev->dev;
+ 	struct mtk_mfg_opp_entry e = {};
+ 	unsigned int i;
+@@ -569,7 +949,7 @@ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
+ 	}
+ 
+ 	for (i = 0; i < mfg->num_gpu_opps; i++) {
+-		memcpy_fromio(&e, mfg->shared_mem + GF_REG_OPP_TABLE_GPU + i * sizeof(e),
++		memcpy_fromio(&e, mfg->shared_mem + l->opp_table_gpu + i * sizeof(e),
+ 			      sizeof(e));
+ 		if (mem_is_zero(&e, sizeof(e))) {
+ 			dev_err(dev, "ran into an empty GPU OPP at index %u\n",
+@@ -578,13 +958,12 @@ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
+ 		}
+ 		mfg->gpu_opps[i].freq = e.freq_khz * HZ_PER_KHZ;
+ 		mfg->gpu_opps[i].u_volt = e.voltage_core * 10;
+-		mfg->gpu_opps[i].level = i;
+ 		if (i < mfg->variant->turbo_below)
+ 			mfg->gpu_opps[i].turbo = true;
+ 	}
+ 
+ 	for (i = 0; i < mfg->num_stack_opps; i++) {
+-		memcpy_fromio(&e, mfg->shared_mem + GF_REG_OPP_TABLE_STK + i * sizeof(e),
++		memcpy_fromio(&e, mfg->shared_mem + l->opp_table_stk + i * sizeof(e),
+ 			      sizeof(e));
+ 		if (mem_is_zero(&e, sizeof(e))) {
+ 			dev_err(dev, "ran into an empty Stack OPP at index %u\n",
+@@ -593,7 +972,6 @@ static int mtk_mfg_read_opp_tables(struct mtk_mfg *mfg)
+ 		}
+ 		mfg->stack_opps[i].freq = e.freq_khz * HZ_PER_KHZ;
+ 		mfg->stack_opps[i].u_volt = e.voltage_core * 10;
+-		mfg->stack_opps[i].level = i;
+ 		if (i < mfg->variant->turbo_below)
+ 			mfg->stack_opps[i].turbo = true;
+ 	}
+@@ -640,16 +1018,65 @@ static const struct mtk_mfg_variant mtk_mfg_mt8196_variant = {
+ 	.regulator_names = mtk_mfg_mt8196_regulators,
+ 	.num_regulators = ARRAY_SIZE(mtk_mfg_mt8196_regulators),
+ 	.turbo_below = 7,
++	.layout = &mtk_mfg_mt8196_layout,
+ 	.init = mtk_mfg_mt8196_init,
+ };
+ 
++/*
++ * MT6878: the EB is loaded and started by the boot firmware in the MFG0
++ * domain, and controls the GPU supplies, PLLs and MTCMOS itself. The AP only
++ * asks it to switch the GPU and to change the OPP.
++ */
++static const struct mtk_mfg_variant mtk_mfg_mt6878_variant = {
++	.layout = &mtk_mfg_mt6878_layout,
++	.eb_fw_managed = true,
++	.single_buck = true,
++	.gf_mem_size = MT6878_GF_MEM_SIZE,
++	.shared_mem_compat = "mediatek,me_GPUEB_SHARED",
++};
++
+ static void mtk_mfg_mbox_rx_callback(struct mbox_client *cl, void *mssg)
+ {
+ 	struct mtk_mfg_mbox *mb = container_of(cl, struct mtk_mfg_mbox, cl);
++	struct device *dev = cl->dev;
++	unsigned long flags;
++	int cmd;
+ 
+-	if (mb->rx_data)
+-		mb->rx_data = memcpy(mb->rx_data, mssg, GPUEB_MBOX_MAX_RX_SIZE);
++	if (!mb->rx_data) {
++		complete(&mb->rx_done);
++		return;
++	}
++
++	cmd = le32_to_cpu(((struct mtk_mfg_ipi_msg *)mssg)->cmd);
++
++	spin_lock_irqsave(&mb->lock, flags);
++	if (mb->expect_cmd == GPUFREQ_NO_CMD) {
++		/* nobody waits: a reply to a command that was given up on */
++		if (cmd == mb->stale_cmd)
++			mb->stale_cmd = GPUFREQ_NO_CMD;
++		spin_unlock_irqrestore(&mb->lock, flags);
++		dev_dbg(dev, "dropped a GPUFreq reply to command %d, nothing outstanding\n",
++			cmd);
++		return;
++	}
++	if (cmd != mb->expect_cmd && cmd == mb->stale_cmd) {
++		int expect = mb->expect_cmd;
++
++		mb->stale_cmd = GPUFREQ_NO_CMD;
++		spin_unlock_irqrestore(&mb->lock, flags);
++		dev_dbg(dev, "dropped a late GPUFreq reply to command %d, waiting for %d\n",
++			cmd, expect);
++		return;
++	}
++	if (cmd != mb->expect_cmd && !mb->warned_echo) {
++		/* not seen on MT6878; keep the old behaviour, but say so */
++		mb->warned_echo = true;
++		dev_warn(dev, "GPUFreq reply for command %d while waiting for %d\n",
++			 cmd, mb->expect_cmd);
++	}
++	memcpy(mb->rx_data, mssg, GPUEB_MBOX_MAX_RX_SIZE);
+ 	complete(&mb->rx_done);
++	spin_unlock_irqrestore(&mb->lock, flags);
+ }
+ 
+ static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
+@@ -659,6 +1086,7 @@ static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
+ 	struct dev_pm_opp_data *go = mfg->gpu_opps;
+ 	struct dev_pm_opp_data *prev_o = NULL;
+ 	struct dev_pm_opp_data *o;
++	struct dev_pm_opp_data data;
+ 	int i, ret;
+ 
+ 	for (i = mfg->num_gpu_opps - 1; i >= 0; i--) {
+@@ -680,10 +1108,16 @@ static int mtk_mfg_attach_dev(struct generic_pm_domain *pd, struct device *dev)
+ 		if (prev_o && prev_o->freq == o->freq)
+ 			continue;
+ 
+-		ret = dev_pm_opp_add_dynamic(dev, o);
++		/*
++		 * Firmware indices run from fastest to slowest. Genpd levels
++		 * increase with performance, and zero means no performance vote.
++		 */
++		data = *o;
++		data.level = mfg->num_gpu_opps - i;
++		ret = dev_pm_opp_add_dynamic(dev, &data);
+ 		if (ret) {
+ 			dev_err(dev, "Failed to add OPP level %u from PD %s: %pe\n",
+-				o->level, pd->name, ERR_PTR(ret));
++				data.level, pd->name, ERR_PTR(ret));
+ 			dev_pm_opp_remove_all_dynamic(dev);
+ 			return ret;
+ 		}
+@@ -698,10 +1132,71 @@ static void mtk_mfg_detach_dev(struct generic_pm_domain *pd, struct device *dev)
+ 	dev_pm_opp_remove_all_dynamic(dev);
+ }
+ 
++/* called with mfg->lock held */
++static int mtk_mfg_apply_performance(struct mtk_mfg *mfg, unsigned int state)
++{
++	unsigned int idx;
++	int ret;
++
++	lockdep_assert_held(&mfg->lock);
++
++	if (state > mfg->num_gpu_opps)
++		return -EINVAL;
++
++	/* No vote uses the lowest OPP; keep zero out of the live OPP levels. */
++	idx = mfg->num_gpu_opps - max(state, 1U);
++	ret = mtk_mfg_set_oppidx(mfg, idx);
++	dev_dbg(&mfg->pdev->dev,
++		"pstate=%u idx=%u ret=%d shared_idx=%u freq=%lu power=%u active=%u\n",
++		state, idx, ret, readl(mfg->shared_mem + GF_REG_GPU_OPP_IDX),
++		mtk_mfg_recalc_rate_gpu(&mfg->clk_core_hw, 0),
++		readl(mfg->shared_mem + GF_REG_POWER_COUNT),
++		readl(mfg->shared_mem + GF_REG_ACTIVE_COUNT));
++	if (!ret) {
++		mfg->perf_state = state;
++		mfg->perf_pending = false;
++	}
++	return ret;
++}
++
++/*
++ * The OPP asked for could not be restored when the GPU was switched on. The
++ * domain stays on (failing the power-on would leave the GPU's runtime PM in
++ * error for good), and the request is sent again from here until it is taken.
++ */
++static void mtk_mfg_perf_work(struct work_struct *work)
++{
++	struct mtk_mfg *mfg = container_of(to_delayed_work(work), struct mtk_mfg,
++					   perf_work);
++	struct device *dev = &mfg->pdev->dev;
++	int ret;
++
++	mutex_lock(&mfg->lock);
++	if (!mfg->gpu_on || !mfg->perf_pending)
++		goto out;
++
++	ret = mtk_mfg_apply_performance(mfg, mfg->perf_state);
++	if (!ret) {
++		dev_info(dev, "OPP for performance state %u restored after %u retries\n",
++			 mfg->perf_state, mfg->perf_retries + 1);
++		goto out;
++	}
++
++	if (++mfg->perf_retries < GPUFREQ_PERF_RETRIES)
++		queue_delayed_work(system_freezable_wq, &mfg->perf_work,
++				   msecs_to_jiffies(GPUFREQ_PERF_RETRY_MS << mfg->perf_retries));
++	else
++		dev_err(dev, "OPP for performance state %u not restored: %pe\n",
++			mfg->perf_state, ERR_PTR(ret));
++out:
++	mutex_unlock(&mfg->lock);
++}
++
+ static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
+ 				   unsigned int state)
+ {
+ 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
++	int ret = 0;
+ 
+ 	/*
+ 	 * pmdomain core intentionally sets a performance state before turning
+@@ -710,17 +1205,38 @@ static int mtk_mfg_set_performance(struct generic_pm_domain *pd,
+ 	 * powered on. To do this, return cleanly without taking action, and
+ 	 * defer setting what pmdomain core set in mtk_mfg_power_on.
+ 	 */
+-	if (mfg->pd.status != GENPD_STATE_ON)
+-		return 0;
++	mutex_lock(&mfg->lock);
++	if (mfg->pd.status != GENPD_STATE_ON || !mfg->gpu_on) {
++		/* applied by mtk_mfg_power_on(), from pd->performance_state */
++		mfg->perf_state = state;
++		goto out;
++	}
+ 
+-	return mtk_mfg_set_oppidx(mfg, state);
++	ret = mtk_mfg_apply_performance(mfg, state);
++out:
++	mutex_unlock(&mfg->lock);
++	return ret;
+ }
+ 
++static int __mtk_mfg_power_on(struct mtk_mfg *mfg);
++
+ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+ {
+ 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
+ 	int ret;
+ 
++	mutex_lock(&mfg->lock);
++	ret = __mtk_mfg_power_on(mfg);
++	mutex_unlock(&mfg->lock);
++
++	return ret;
++}
++
++static int __mtk_mfg_power_on(struct mtk_mfg *mfg)
++{
++	struct generic_pm_domain *pd = &mfg->pd;
++	int ret;
++
+ 	ret = regulator_bulk_enable(mfg->variant->num_regulators,
+ 				    mfg->gpu_regs);
+ 	if (ret)
+@@ -738,18 +1254,33 @@ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+ 	if (ret)
+ 		goto err_disable_clks;
+ 
+-	mfg->ipi_magic = readl(mfg->gpr + GPR_IPI_MAGIC);
++	/* a firmware-managed EB keeps running: the magic is read in probe */
++	if (!mfg->variant->eb_fw_managed)
++		mfg->ipi_magic = readl(mfg->gpr + GPR_IPI_MAGIC);
+ 
+ 	ret = mtk_mfg_power_control(mfg, true);
+ 	if (ret)
+ 		goto err_eb_off;
++	mfg->gpu_on = true;
+ 
+ 	/* Don't try to set a OPP in probe before OPPs have been read from EB */
+ 	if (mfg->gpu_opps) {
+ 		/* The aforementioned deferred setting of pmdomain's state */
+-		ret = mtk_mfg_set_oppidx(mfg, pd->performance_state);
+-		if (ret)
+-			dev_warn(&mfg->pdev->dev, "Failed to set oppidx in %s\n", __func__);
++		mfg->perf_state = pd->performance_state;
++		ret = mtk_mfg_apply_performance(mfg, mfg->perf_state);
++		if (ret) {
++			/*
++			 * Genpd, the OPP core and devfreq take this state as
++			 * set and won't ask for it again: retry from a work.
++			 */
++			dev_warn(&mfg->pdev->dev,
++				 "Failed to restore OPP for performance state %u: %pe, retrying\n",
++				 mfg->perf_state, ERR_PTR(ret));
++			mfg->perf_pending = true;
++			mfg->perf_retries = 0;
++			queue_delayed_work(system_freezable_wq, &mfg->perf_work,
++					   msecs_to_jiffies(GPUFREQ_PERF_RETRY_MS));
++		}
+ 	}
+ 
+ 	return 0;
+@@ -766,9 +1297,22 @@ static int mtk_mfg_power_on(struct generic_pm_domain *pd)
+ 	return ret;
+ }
+ 
++static int __mtk_mfg_power_off(struct mtk_mfg *mfg);
++
+ static int mtk_mfg_power_off(struct generic_pm_domain *pd)
+ {
+ 	struct mtk_mfg *mfg = mtk_mfg_from_genpd(pd);
++	int ret;
++
++	mutex_lock(&mfg->lock);
++	ret = __mtk_mfg_power_off(mfg);
++	mutex_unlock(&mfg->lock);
++
++	return ret;
++}
++
++static int __mtk_mfg_power_off(struct mtk_mfg *mfg)
++{
+ 	struct device *dev = &mfg->pdev->dev;
+ 	int ret;
+ 
+@@ -777,6 +1321,9 @@ static int mtk_mfg_power_off(struct generic_pm_domain *pd)
+ 		dev_err(dev, "power_control failed: %pe\n", ERR_PTR(ret));
+ 		return ret;
+ 	}
++	/* a pending OPP retry is dropped: power-on applies the state again */
++	mfg->gpu_on = false;
++	mfg->perf_pending = false;
+ 
+ 	ret = mtk_mfg_eb_off(mfg);
+ 	if (ret) {
+@@ -805,12 +1352,19 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
+ 	if (!gf)
+ 		return -ENOMEM;
+ 
++	gf->tx_data = devm_kzalloc(dev, sizeof(struct mtk_mfg_ipi_msg), GFP_KERNEL);
++	if (!gf->tx_data)
++		return -ENOMEM;
++
+ 	gf->rx_data = devm_kzalloc(dev, GPUEB_MBOX_MAX_RX_SIZE, GFP_KERNEL);
+ 	if (!gf->rx_data)
+ 		return -ENOMEM;
+ 
+ 	gf->mfg = mfg;
+ 	init_completion(&gf->rx_done);
++	spin_lock_init(&gf->lock);
++	gf->expect_cmd = GPUFREQ_NO_CMD;
++	gf->stale_cmd = GPUFREQ_NO_CMD;
+ 	gf->cl.dev = dev;
+ 	gf->cl.rx_callback = mtk_mfg_mbox_rx_callback;
+ 	gf->cl.tx_tout = GPUEB_TIMEOUT_US / USEC_PER_MSEC;
+@@ -820,6 +1374,10 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
+ 
+ 	mfg->gf_mbox = gf;
+ 
++	/* a firmware-managed EB isn't put to sleep */
++	if (mfg->variant->eb_fw_managed)
++		return 0;
++
+ 	slp = devm_kzalloc(dev, sizeof(*slp), GFP_KERNEL);
+ 	if (!slp)
+ 		return -ENOMEM;
+@@ -840,6 +1398,90 @@ static int mtk_mfg_init_mbox(struct mtk_mfg *mfg)
+ 	return 0;
+ }
+ 
++static void mtk_mfg_free_mbox(struct mtk_mfg *mfg)
++{
++	if (mfg->slp_mbox) {
++		mbox_free_channel(mfg->slp_mbox->ch);
++		mfg->slp_mbox->ch = NULL;
++	}
++	mbox_free_channel(mfg->gf_mbox->ch);
++	mfg->gf_mbox->ch = NULL;
++}
++
++/*
++ * Some bootloaders create the EB carveout themselves, as a reserved-memory
++ * node without a phandle; find it by its compatible then.
++ */
++static int mtk_mfg_find_fw_shared_mem(struct mtk_mfg *mfg, struct resource *res)
++{
++	struct device_node *parent;
++	int ret = -ENODEV;
++
++	parent = of_find_node_by_path("/reserved-memory");
++	if (!parent)
++		return -ENODEV;
++
++	for_each_available_child_of_node_scoped(parent, np) {
++		if (!of_device_is_compatible(np, mfg->variant->shared_mem_compat))
++			continue;
++		if (!of_property_read_bool(np, "no-map")) {
++			ret = -EINVAL;
++			break;
++		}
++		ret = of_address_to_resource(np, 0, res);
++		break;
++	}
++	of_node_put(parent);
++
++	return ret;
++}
++
++static int mtk_mfg_get_shared_mem(struct mtk_mfg *mfg)
++{
++	struct device *dev = &mfg->pdev->dev;
++	struct resource res;
++	int ret;
++
++	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
++	if (ret == -ENODEV && mfg->variant->shared_mem_compat)
++		ret = mtk_mfg_find_fw_shared_mem(mfg, &res);
++	if (ret)
++		return dev_err_probe(dev, ret, "Couldn't get GPUEB shared memory\n");
++
++	mfg->shared_mem_size = resource_size(&res);
++	if (mfg->variant->gf_mem_size) {
++		if (mfg->shared_mem_size < mfg->variant->gf_mem_size)
++			return dev_err_probe(dev, -EINVAL, "GPUEB shared memory too small\n");
++		mfg->shared_mem_size = mfg->variant->gf_mem_size;
++	}
++
++	mfg->shared_mem = devm_ioremap(dev, res.start, mfg->shared_mem_size);
++	if (!mfg->shared_mem)
++		return dev_err_probe(dev, -ENOMEM, "Can't ioremap GPUEB shared memory\n");
++	mfg->shared_mem_phys = res.start;
++
++	return 0;
++}
++
++/*
++ * Attach to an EB that the firmware started: it must be running, and it
++ * leaves the IPI magic in a GPR. The downstream driver clears the GPR after
++ * reading it; keep it, so that the driver can be bound again.
++ */
++static int mtk_mfg_eb_attach(struct mtk_mfg *mfg)
++{
++	struct device *dev = &mfg->pdev->dev;
++
++	if (!mtk_mfg_is_powered_on(mfg))
++		return dev_err_probe(dev, -ENODEV, "EB domain is off\n");
++
++	mfg->ipi_magic = readl(mfg->gpr + GPR_IPI_MAGIC);
++	if (!mfg->ipi_magic)
++		return dev_err_probe(dev, -ENODEV, "EB gave no IPI magic\n");
++
++	return 0;
++}
++
+ static int mtk_mfg_init_clk_provider(struct mtk_mfg *mfg)
+ {
+ 	struct device *dev = &mfg->pdev->dev;
+@@ -912,7 +1554,7 @@ static int mtk_mfg_init_nvmem_provider(struct mtk_mfg *mfg)
+ 		return dev_err_probe(dev, PTR_ERR(nvdev), "Couldn't register nvmem provider\n");
+ 
+ 	cell.name = "shader-present";
+-	cell.offset = GF_REG_SHADER_PRESENT;
++	cell.offset = mfg->variant->layout->shader_present;
+ 	cell.bytes = 4;
+ 	cell.np = of_get_child_by_name(dev->of_node, cell.name);
+ 
+@@ -927,12 +1569,54 @@ static int mtk_mfg_init_nvmem_provider(struct mtk_mfg *mfg)
+ 	return 0;
+ }
+ 
++/*
++ * GPU temperature as the EB keeps it in the shared status: degrees Celsius,
++ * -274 before the first measurement (the downstream
++ * gpufreq_get_cur_temperature() reads the same word). The EB measures while
++ * the GPU is on; with the GPU off the last value stays, which a passive trip
++ * can live with. Registered only when a thermal zone in the device tree
++ * names this node as its sensor.
++ */
++static int mtk_mfg_get_temp(struct thermal_zone_device *tz, int *temp)
++{
++	struct mtk_mfg *mfg = thermal_zone_device_priv(tz);
++	int t;
++
++	if (!mfg->gf_ready)
++		return -EAGAIN;
++
++	t = (int)readl(mfg->shared_mem + GF_REG_TEMP_RAW);
++	if (t < -40 || t > 150)
++		return -EAGAIN;
++
++	*temp = t * MILLIDEGREE_PER_DEGREE;
++
++	return 0;
++}
++
++static const struct thermal_zone_device_ops mtk_mfg_thermal_ops = {
++	.get_temp = mtk_mfg_get_temp,
++};
++
++static void mtk_mfg_init_thermal(struct mtk_mfg *mfg)
++{
++	struct device *dev = &mfg->pdev->dev;
++	struct thermal_zone_device *tz;
++
++	tz = devm_thermal_of_zone_register(dev, 0, mfg, &mtk_mfg_thermal_ops);
++	if (IS_ERR(tz)) {
++		if (PTR_ERR(tz) != -ENODEV)
++			dev_warn(dev, "GPU thermal zone not registered: %pe\n", tz);
++		return;
++	}
++	dev_info(dev, "GPU thermal zone from the EB temperature\n");
++}
++
+ static int mtk_mfg_probe(struct platform_device *pdev)
+ {
+ 	struct mtk_mfg *mfg;
+ 	struct device *dev = &pdev->dev;
+ 	const struct mtk_mfg_variant *data = of_device_get_match_data(dev);
+-	struct resource res;
+ 	int ret, i;
+ 
+ 	mfg = devm_kzalloc(dev, sizeof(*mfg), GFP_KERNEL);
+@@ -941,6 +1625,8 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ 
+ 	mfg->pdev = pdev;
+ 	mfg->variant = data;
++	mutex_init(&mfg->lock);
++	INIT_DELAYED_WORK(&mfg->perf_work, mtk_mfg_perf_work);
+ 
+ 	dev_set_drvdata(dev, mfg);
+ 
+@@ -949,12 +1635,27 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ 		return dev_err_probe(dev, PTR_ERR(mfg->gpr),
+ 				     "Couldn't retrieve GPR MMIO registers\n");
+ 
+-	mfg->rpc = devm_platform_ioremap_resource(pdev, 1);
+-	if (IS_ERR(mfg->rpc))
+-		return dev_err_probe(dev, PTR_ERR(mfg->rpc),
+-				     "Couldn't retrieve RPC MMIO registers\n");
++	if (data->eb_fw_managed) {
++		/* the GPR space is EB SRAM: check that it's powered first */
++		mfg->spm = syscon_regmap_lookup_by_phandle(dev->of_node,
++							   "mediatek,scpsys");
++		if (IS_ERR(mfg->spm))
++			return dev_err_probe(dev, PTR_ERR(mfg->spm),
++					     "Couldn't get SCPSYS regmap\n");
++		/* nor the mailbox, which sits in the same domain */
++		if (!mtk_mfg_is_powered_on(mfg))
++			return dev_err_probe(dev, -ENODEV, "EB domain is off\n");
++	} else {
++		mfg->rpc = devm_platform_ioremap_resource(pdev, 1);
++		if (IS_ERR(mfg->rpc))
++			return dev_err_probe(dev, PTR_ERR(mfg->rpc),
++					     "Couldn't retrieve RPC MMIO registers\n");
++	}
+ 
+-	mfg->clk_eb = devm_clk_get(dev, "eb");
++	if (data->eb_fw_managed)
++		mfg->clk_eb = devm_clk_get_optional(dev, "eb");
++	else
++		mfg->clk_eb = devm_clk_get(dev, "eb");
+ 	if (IS_ERR(mfg->clk_eb))
+ 		return dev_err_probe(dev, PTR_ERR(mfg->clk_eb),
+ 				     "Couldn't get 'eb' clock\n");
+@@ -983,15 +1684,9 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Couldn't get GPU regulators\n");
+ 
+-	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
++	ret = mtk_mfg_get_shared_mem(mfg);
+ 	if (ret)
+-		return dev_err_probe(dev, ret, "Couldn't get GPUEB shared memory\n");
+-
+-	mfg->shared_mem = devm_ioremap(dev, res.start, resource_size(&res));
+-	if (!mfg->shared_mem)
+-		return dev_err_probe(dev, -ENOMEM, "Can't ioremap GPUEB shared memory\n");
+-	mfg->shared_mem_size = resource_size(&res);
+-	mfg->shared_mem_phys = res.start;
++		return ret;
+ 
+ 	if (data->init) {
+ 		ret = data->init(mfg);
+@@ -1017,16 +1712,40 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ 		goto err_remove_genpd;
+ 	}
+ 
+-	ret = mtk_mfg_power_on(&mfg->pd);
+-	if (ret) {
+-		dev_err_probe(dev, ret, "Failed to power on MFG\n");
+-		goto err_free_mbox;
+-	}
++	if (data->eb_fw_managed) {
++		/*
++		 * The EB runs already: hand it the shared memory before the
++		 * first GPU power request, as it keeps its state there.
++		 */
++		ret = mtk_mfg_eb_attach(mfg);
++		if (ret)
++			goto err_free_mbox;
+ 
+-	ret = mtk_mfg_init_shared_mem(mfg);
+-	if (ret) {
+-		dev_err_probe(dev, ret, "Couldn't initialize EB shared memory\n");
+-		goto err_power_off;
++		ret = mtk_mfg_init_shared_mem(mfg);
++		if (ret) {
++			dev_err_probe(dev, ret, "Couldn't initialize EB shared memory\n");
++			goto err_free_mbox;
++		}
++		mfg->gf_ready = true;
++
++		ret = mtk_mfg_power_on(&mfg->pd);
++		if (ret) {
++			dev_err_probe(dev, ret, "Failed to power on MFG\n");
++			goto err_free_mbox;
++		}
++	} else {
++		ret = mtk_mfg_power_on(&mfg->pd);
++		if (ret) {
++			dev_err_probe(dev, ret, "Failed to power on MFG\n");
++			goto err_free_mbox;
++		}
++
++		ret = mtk_mfg_init_shared_mem(mfg);
++		if (ret) {
++			dev_err_probe(dev, ret, "Couldn't initialize EB shared memory\n");
++			goto err_power_off;
++		}
++		mfg->gf_ready = true;
+ 	}
+ 
+ 	ret = mtk_mfg_read_opp_tables(mfg);
+@@ -1049,15 +1768,15 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ 		goto err_power_off;
+ 	}
+ 
++	mtk_mfg_init_thermal(mfg);
++
+ 	return 0;
+ 
+ err_power_off:
+ 	mtk_mfg_power_off(&mfg->pd);
++	cancel_delayed_work_sync(&mfg->perf_work);
+ err_free_mbox:
+-	mbox_free_channel(mfg->slp_mbox->ch);
+-	mfg->slp_mbox->ch = NULL;
+-	mbox_free_channel(mfg->gf_mbox->ch);
+-	mfg->gf_mbox->ch = NULL;
++	mtk_mfg_free_mbox(mfg);
+ err_remove_genpd:
+ 	pm_genpd_remove(&mfg->pd);
+ 
+@@ -1065,6 +1784,7 @@ static int mtk_mfg_probe(struct platform_device *pdev)
+ }
+ 
+ static const struct of_device_id mtk_mfg_of_match[] = {
++	{ .compatible = "mediatek,mt6878-gpufreq", .data = &mtk_mfg_mt6878_variant },
+ 	{ .compatible = "mediatek,mt8196-gpufreq", .data = &mtk_mfg_mt8196_variant },
+ 	{}
+ };
+@@ -1073,18 +1793,21 @@ MODULE_DEVICE_TABLE(of, mtk_mfg_of_match);
+ static void mtk_mfg_remove(struct platform_device *pdev)
+ {
+ 	struct mtk_mfg *mfg = dev_get_drvdata(&pdev->dev);
++	bool on;
+ 
+-	if (mtk_mfg_is_powered_on(mfg))
++	/* a firmware-managed EB is always on, the GPU behind it may not be */
++	if (mfg->variant->eb_fw_managed)
++		on = mfg->pd.status == GENPD_STATE_ON;
++	else
++		on = mtk_mfg_is_powered_on(mfg);
++	if (on)
+ 		mtk_mfg_power_off(&mfg->pd);
++	cancel_delayed_work_sync(&mfg->perf_work);
+ 
+ 	of_genpd_del_provider(pdev->dev.of_node);
+ 	pm_genpd_remove(&mfg->pd);
+ 
+-	mbox_free_channel(mfg->gf_mbox->ch);
+-	mfg->gf_mbox->ch = NULL;
+-
+-	mbox_free_channel(mfg->slp_mbox->ch);
+-	mfg->slp_mbox->ch = NULL;
++	mtk_mfg_free_mbox(mfg);
+ }
+ 
+ static struct platform_driver mtk_mfg_driver = {
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.c b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+index 6089c8cf5..df19d2830 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.c
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.c
+@@ -2,6 +2,7 @@
+ /*
+  * Copyright (c) 2020 Collabora Ltd.
+  */
++#include <dt-bindings/clock/mediatek,mt6878-display-voter.h>
+ #include <linux/arm-smccc.h>
+ #include <linux/clk.h>
+ #include <linux/clk-provider.h>
+@@ -9,6 +10,7 @@
+ #include <linux/io.h>
+ #include <linux/iopoll.h>
+ #include <linux/mfd/syscon.h>
++#include <linux/moduleparam.h>
+ #include <linux/of.h>
+ #include <linux/of_clk.h>
+ #include <linux/platform_device.h>
+@@ -16,10 +18,15 @@
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/soc/mediatek/infracfg.h>
++#include <linux/soc/mediatek/mt6878-display-gates.h>
++#include <linux/soc/mediatek/mt6878-disp-iommu.h>
++#include <linux/soc/mediatek/mt6878-display-voter.h>
+ #include <linux/soc/mediatek/mtk_sip_svc.h>
+ 
+ #include "mt6735-pm-domains.h"
+ #include "mt6795-pm-domains.h"
++#include "mt6878-pm-domains.h"
++#include "mt6878-display-pm-domains.h"
+ #include "mt6893-pm-domains.h"
+ #include "mt8167-pm-domains.h"
+ #include "mt8173-pm-domains.h"
+@@ -67,9 +74,28 @@ struct scpsys_domain {
+ 	int num_subsys_clks;
+ 	struct clk_bulk_data *subsys_clks;
+ 	struct regulator *supply;
++	/* Mixed HWV state is serialized by genpd; faulted votes retain resources. */
++	struct regmap *hwv_base;
++	bool hwv_supply_held;
++	bool hwv_clks_held;
++	bool hwv_lp_held;
++	bool hwv_on;
++	bool hwv_faulted;
++	/* Stage 93: genpd's own system-sleep prepare, saved before the guards. */
++	int (*genpd_sleep_prepare)(struct device *dev);
++	bool display_on;
++	bool display_supply_held;
++	bool display_clks_held;
++	bool display_subsys_held;
++	bool boot_retained;
+ };
+ 
+ struct scpsys {
++	/* Monotonic fault latch: a failed child startup must also pin its parent. */
++	bool display_faulted;
++	bool retain_boot;
++	bool boot_on_adoption;
++	bool boot_acquisition_started;
+ 	struct device *dev;
+ 	struct regmap *base;
+ 	const struct scpsys_soc_data *soc_data;
+@@ -79,6 +105,26 @@ struct scpsys {
+ 	struct generic_pm_domain *domains[];
+ };
+ 
++static bool mt6878_boot_power_failed;
++
++/*
++ * Stage 82: the adopted DISP domain gets its real OFF/ON callbacks, but OFF
++ * is refused until this is set at runtime, so boot matches merged81.
++ */
++static bool disp_power_cycle = true;	/* Stage 86b: default on */
++module_param(disp_power_cycle, bool, 0644);
++MODULE_PARM_DESC(disp_power_cycle, "Allow the adopted MT6878 DISP domain to power off");
++
++/*
++ * Stage 93: let system suspend (s2idle) pass the adopted DISP domain. Only
++ * genpd's prepare/complete run; the noirq phase calls the drivers' own noirq
++ * callbacks and never powers DISP off or on, so DISP power stays under the
++ * validated runtime cycle (Stage 86b). Off by default = Stage 91 behaviour.
++ */
++static bool disp_system_sleep;
++module_param(disp_system_sleep, bool, 0644);
++MODULE_PARM_DESC(disp_system_sleep, "Stage 93: allow system suspend past the MT6878 DISP domain (noirq leaves DISP power alone)");
++
+ #define to_scpsys_domain(gpd) container_of(gpd, struct scpsys_domain, genpd)
+ 
+ static bool scpsys_domain_is_on(struct scpsys_domain *pd)
+@@ -125,6 +171,236 @@ static bool scpsys_hwv_domain_is_enable_done(struct scpsys_domain *pd)
+ 	return (val[0] & mask) && (val[1] & mask) && !(val[2] & mask);
+ }
+ 
++static int scpsys_regulator_enable(struct regulator *supply);
++static int scpsys_regulator_disable(struct regulator *supply);
++
++static enum scpsys_mtcmos_type
++scpsys_domain_type(const struct scpsys_soc_data *soc, u32 id)
++{
++	bool direct, voted;
++
++	if (soc->type != SCPSYS_MTCMOS_TYPE_MIXED)
++		return soc->type;
++	direct = id < soc->num_domains && soc->domains_data[id].sta_mask;
++	voted = id < soc->num_hwv_domains && soc->hwv_domains_data[id].name;
++	if (direct == voted)
++		return SCPSYS_MTCMOS_TYPE_MAX;
++	return direct ? SCPSYS_MTCMOS_TYPE_DIRECT_CTL : SCPSYS_MTCMOS_TYPE_HW_VOTER;
++}
++
++static bool scpsys_domain_parent_valid(const struct scpsys_soc_data *soc,
++				       u32 id, u32 parent)
++{
++	u32 expected = U32_MAX;
++	unsigned int i;
++
++	for (i = 0; i < soc->num_parents; i++)
++		if (soc->parents[i].child == id)
++			expected = soc->parents[i].parent;
++	return parent == expected;
++}
++
++static bool scpsys_domain_hierarchy_complete(struct scpsys *scpsys)
++{
++	const struct scpsys_soc_data *soc = scpsys->soc_data;
++	unsigned int i;
++
++	for (i = 0; i < soc->num_parents; i++) {
++		u32 parent = soc->parents[i].parent, child = soc->parents[i].child;
++
++		if (parent >= scpsys->pd_data.num_domains ||
++		    child >= scpsys->pd_data.num_domains ||
++		    !scpsys->domains[parent] || !scpsys->domains[child])
++			return false;
++	}
++	return true;
++}
++
++/* Propagate regmap errors instead of treating an unreadable bank as idle/off. */
++static int scpsys_mixed_hwv_status(struct scpsys_domain *pd, bool on)
++{
++	const struct scpsys_hwv_domain_data *hwv = pd->hwv_data;
++	u32 regs[3] = { hwv->done, on ? hwv->en : hwv->clr_sta, hwv->set_sta };
++	u32 values[3], mask = BIT(hwv->setclr_bit);
++	int ret;
++
++	ret = regmap_multi_reg_read(pd->hwv_base, regs, values, on ? 3 : 2);
++	if (ret)
++		return ret;
++	return (values[0] & mask) &&
++		(on ? (values[1] & mask) && !(values[2] & mask) : !(values[1] & mask));
++}
++
++static int scpsys_require_off(struct scpsys_domain *pd)
++{
++	u32 values[5], mask;
++	int ret;
++
++	if (pd->hwv_data) {
++		const struct scpsys_hwv_domain_data *hwv = pd->hwv_data;
++		u32 regs[5] = { hwv->done, hwv->set, hwv->en, hwv->set_sta, hwv->clr_sta };
++
++		ret = regmap_multi_reg_read(pd->hwv_base, regs, values, ARRAY_SIZE(regs));
++		if (ret)
++			return ret;
++		mask = BIT(hwv->setclr_bit);
++		if (!(values[0] & mask) ||
++		    ((values[1] | values[2] | values[3] | values[4]) & mask))
++			return -EBUSY;
++		return 0;
++	}
++
++	ret = regmap_read(pd->scpsys->base, pd->data->ctl_offs, &values[0]);
++	if (ret)
++		return ret;
++	ret = regmap_read(pd->scpsys->base, pd->data->pwr_sta_offs, &values[1]);
++	if (ret)
++		return ret;
++	ret = regmap_read(pd->scpsys->base, pd->data->pwr_sta2nd_offs, &values[2]);
++	if (ret)
++		return ret;
++	mask = pd->data->sta2nd_mask ?: pd->data->sta_mask;
++	if ((values[0] & (PWR_ON_BIT | PWR_ON_2ND_BIT)) ||
++	    (values[1] & pd->data->sta_mask) || (values[2] & mask))
++		return -EBUSY;
++	return 0;
++}
++
++static int scpsys_mixed_hwv_vote(struct scpsys_domain *pd, bool on, bool *issued)
++{
++	const struct scpsys_hwv_domain_data *hwv = pd->hwv_data;
++	u32 mask = BIT(hwv->setclr_bit), value, offset = on ? hwv->set : hwv->clr;
++	int ret, status;
++
++	*issued = false;
++	ret = regmap_read_poll_timeout(pd->hwv_base, hwv->done, value, value & mask,
++				       MTK_HWV_POLL_DELAY_US, MTK_HWV_POLL_TIMEOUT);
++	if (ret)
++		return ret;
++	/* A transport error cannot prove that the write did not reach hardware. */
++	*issued = true;
++	ret = regmap_write(pd->hwv_base, offset, mask);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(pd->hwv_base, offset, value,
++				       on ? value & mask : !(value & mask),
++				       MTK_HWV_PREPARE_DELAY_US, MTK_HWV_PREPARE_TIMEOUT);
++	if (ret)
++		return ret;
++	if (!on)
++		usleep_range(100, 110);
++	ret = read_poll_timeout(scpsys_mixed_hwv_status, status, status != 0,
++				MTK_HWV_POLL_DELAY_US, MTK_HWV_POLL_TIMEOUT, false, pd, on);
++	return ret ?: (status < 0 ? status : 0);
++}
++
++static void scpsys_mixed_hwv_drop_lp(struct scpsys_domain *pd)
++{
++	if (pd->hwv_lp_held) {
++		clk_bulk_disable_unprepare(pd->num_subsys_clks, pd->subsys_clks);
++		pd->hwv_lp_held = false;
++	}
++}
++
++static void scpsys_mixed_hwv_drop_resources(struct scpsys_domain *pd)
++{
++	scpsys_mixed_hwv_drop_lp(pd);
++	if (pd->hwv_clks_held) {
++		clk_bulk_disable_unprepare(pd->num_clks, pd->clks);
++		pd->hwv_clks_held = false;
++	}
++	if (pd->hwv_supply_held) {
++		scpsys_regulator_disable(pd->supply);
++		pd->hwv_supply_held = false;
++	}
++}
++
++static int scpsys_mixed_hwv_power_on(struct generic_pm_domain *genpd)
++{
++	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
++	bool issued, rollback_issued;
++	int ret, rollback;
++
++	if (READ_ONCE(pd->scpsys->display_faulted))
++		return -EIO;
++	if (pd->hwv_faulted)
++		return -EIO;
++	if (pd->hwv_on)
++		return 0;
++	ret = scpsys_regulator_enable(pd->supply);
++	if (ret)
++		return ret;
++	pd->hwv_supply_held = true;
++	ret = clk_bulk_prepare_enable(pd->num_clks, pd->clks);
++	if (ret)
++		goto drop_resources;
++	pd->hwv_clks_held = true;
++	ret = clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks);
++	if (ret)
++		goto drop_resources;
++	pd->hwv_lp_held = true;
++	ret = scpsys_mixed_hwv_vote(pd, true, &issued);
++	if (ret) {
++		if (issued) {
++			rollback = scpsys_mixed_hwv_vote(pd, false, &rollback_issued);
++			if (rollback) {
++				pd->hwv_faulted = true;
++				dev_err(pd->scpsys->dev, "HWV rollback failed; retaining resources\n");
++				return ret;
++			}
++		}
++		goto drop_resources;
++	}
++	pd->hwv_on = true;
++	scpsys_mixed_hwv_drop_lp(pd);
++	return 0;
++
++drop_resources:
++	scpsys_mixed_hwv_drop_resources(pd);
++	return ret;
++}
++
++static int scpsys_mixed_hwv_power_off(struct generic_pm_domain *genpd)
++{
++	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
++	bool issued, rollback_issued;
++	int ret, rollback;
++
++	if (READ_ONCE(pd->scpsys->display_faulted))
++		return -EIO;
++	if (!pd->hwv_supply_held && !pd->hwv_clks_held)
++		return 0;
++	if (!pd->hwv_lp_held) {
++		ret = clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks);
++		if (ret)
++			return ret;
++		pd->hwv_lp_held = true;
++	}
++	ret = scpsys_mixed_hwv_vote(pd, false, &issued);
++	if (ret) {
++		if (!issued) {
++			if (!pd->hwv_faulted)
++				scpsys_mixed_hwv_drop_lp(pd);
++			return ret;
++		}
++		rollback = scpsys_mixed_hwv_vote(pd, true, &rollback_issued);
++		if (rollback) {
++			pd->hwv_faulted = true;
++			pd->hwv_on = false;
++			dev_err(pd->scpsys->dev, "HWV restore failed; retaining resources\n");
++			return ret;
++		}
++		pd->hwv_faulted = false;
++		pd->hwv_on = true;
++		scpsys_mixed_hwv_drop_lp(pd);
++		return ret;
++	}
++	pd->hwv_on = false;
++	pd->hwv_faulted = false;
++	scpsys_mixed_hwv_drop_resources(pd);
++	return 0;
++}
++
+ static int scpsys_sec_infra_power_on(bool on)
+ {
+ 	struct arm_smccc_res res;
+@@ -613,6 +889,451 @@ static void scpsys_modem_pwrseq_off(struct scpsys_domain *pd)
+ 		regmap_clear_bits(scpsys->base, pd->data->ctl_offs, PWR_RST_B_BIT);
+ }
+ 
++/* MT6878 native DISP only: failures retain resources until reboot. */
++static int scpsys_display_fault(struct scpsys_domain *pd, int ret)
++{
++	WRITE_ONCE(pd->scpsys->display_faulted, true);
++	dev_err(pd->scpsys->dev, "native DISP failed (%d); hierarchy retained until reboot\n", ret);
++	return ret;
++}
++
++static int scpsys_display_gates(struct scpsys_domain *pd, bool idle)
++{
++	int i, ret;
++
++	if (pd->num_subsys_clks != 2)
++		return -EINVAL;
++	for (i = 0; i < pd->num_subsys_clks; i++) {
++		ret = mt6878_display_gates_check(pd->subsys_clks[i].clk, i, idle);
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int scpsys_boot_hwv_state(struct scpsys_domain *pd, bool *voted)
++{
++	const struct scpsys_hwv_domain_data *hwv = pd->hwv_data;
++	u32 regs[] = { hwv->done, hwv->set, hwv->en, hwv->set_sta, hwv->clr_sta };
++	u32 values[ARRAY_SIZE(regs)], mask = BIT(hwv->setclr_bit);
++	int ret;
++
++	ret = regmap_multi_reg_read(pd->hwv_base, regs, values, ARRAY_SIZE(regs));
++	if (ret)
++		return ret;
++	if (!(values[0] & mask) || ((values[1] ^ values[2]) & mask) ||
++	    ((values[3] | values[4]) & mask))
++		return -EHOSTDOWN;
++
++	*voted = values[2] & mask;
++	return 0;
++}
++
++static int scpsys_boot_check(struct scpsys_domain *pd, bool allow_unvoted)
++{
++	const struct scpsys_bus_prot_data *bpd;
++	u32 value, required, blocked, sta_mask;
++	bool voted;
++	int ret;
++
++	if (pd->hwv_data) {
++		ret = scpsys_boot_hwv_state(pd, &voted);
++		if (ret)
++			return ret;
++		return voted || allow_unvoted ? 0 : -EHOSTDOWN;
++	}
++
++	required = PWR_RST_B_BIT | PWR_ON_BIT | PWR_ON_2ND_BIT |
++		   pd->data->sta_mask | pd->data->sta2nd_mask;
++	blocked = PWR_ISO_BIT | PWR_CLK_DIS_BIT | pd->data->sram_pdn_bits |
++		  pd->data->sram_pdn_ack_bits;
++	ret = regmap_read(pd->scpsys->base, pd->data->ctl_offs, &value);
++	if (ret)
++		return ret;
++	if ((value & (required | blocked)) != required)
++		return -EHOSTDOWN;
++
++	bpd = &pd->data->bp_cfg[0];
++	sta_mask = bpd->bus_prot_sta_mask;
++	if (pd->scpsys->boot_on_adoption) {
++		/* MT6878 DISP protection request lives in INFRACFG. */
++		ret = regmap_read(scpsys_bus_protect_get_regmap(pd, bpd), 0x0c10, &value);
++		if (ret)
++			return ret;
++		if (value & bpd->bus_prot_set_clr_mask)
++			return -EBUSY;
++
++		/* Trial exception for the observed retained-LK status only. */
++		sta_mask &= ~BIT(18);
++	}
++	ret = regmap_read(scpsys_bus_protect_get_sta_regmap(pd, bpd),
++			  bpd->bus_prot_sta, &value);
++	if (ret)
++		return ret;
++	return value & sta_mask ? -EBUSY : 0;
++}
++
++static int scpsys_boot_is_on(struct scpsys_domain *pd)
++{
++	return scpsys_boot_check(pd, false);
++}
++
++/* Called only after the retained clocks and failure latch are armed. */
++static int scpsys_adopt_boot_hwv(struct scpsys_domain *pd)
++{
++	const struct scpsys_hwv_domain_data *hwv = pd->hwv_data;
++	u32 value, mask = BIT(hwv->setclr_bit);
++	bool voted;
++	int ret, status;
++
++	ret = scpsys_boot_hwv_state(pd, &voted);
++	if (ret || voted)
++		return ret;
++
++	ret = regmap_write(pd->hwv_base, hwv->set, mask);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(pd->hwv_base, hwv->set, value, value & mask,
++				       MTK_HWV_PREPARE_DELAY_US, MTK_HWV_PREPARE_TIMEOUT);
++	if (ret)
++		return ret;
++
++	ret = read_poll_timeout(scpsys_mixed_hwv_status, status, status != 0,
++				MTK_HWV_POLL_DELAY_US, MTK_HWV_POLL_TIMEOUT,
++				false, pd, true);
++	return ret ?: (status < 0 ? status : 0);
++}
++
++static int scpsys_boot_power_on(struct generic_pm_domain *genpd)
++{
++	struct scpsys_domain *pd = to_scpsys_domain(genpd);
++
++	if (READ_ONCE(pd->scpsys->display_faulted))
++		return -EIO;
++	return scpsys_boot_is_on(pd);
++}
++
++static int scpsys_boot_power_off(struct generic_pm_domain *genpd)
++{
++	return -EBUSY;
++}
++
++static bool scpsys_clock_is_boot_held(struct clk *clk)
++{
++	struct clk_hw *hw = __clk_get_hw(clk);
++
++	return hw && (clk_hw_get_flags(hw) & CLK_IS_CRITICAL) &&
++	       clk_hw_is_prepared(hw) && __clk_is_enabled(clk);
++}
++
++static int scpsys_display_power_on(struct generic_pm_domain *genpd);
++static int scpsys_display_power_off(struct generic_pm_domain *genpd);
++
++static int scpsys_retain_boot(struct scpsys_domain *pd)
++{
++	unsigned int vote = pd->hwv_data ? CLK_MT6878_MMINFRA_VOTE : CLK_MT6878_DISP_VOTE;
++	unsigned int i;
++	int ret;
++
++	/* The native binding has no supply, avoiding regulator state changes. */
++	if (pd->supply || pd->num_clks != 1)
++		return -EINVAL;
++	ret = mt6878_display_vote_check_boot(pd->clks[0].clk, vote);
++	if (ret)
++		return ret;
++	ret = scpsys_boot_check(pd, pd->scpsys->boot_on_adoption);
++	if (ret)
++		return ret;
++	if (!scpsys_clock_is_boot_held(pd->clks[0].clk))
++		return -EHOSTDOWN;
++	if (pd->data) {
++		ret = scpsys_display_gates(pd, false);
++		if (ret)
++			return ret;
++	}
++	for (i = 0; i < pd->num_subsys_clks; i++) {
++		/*
++		 * LK never uses MDP, so MDP_SMI0 is gated at boot (Stage 61,
++		 * MDP CG 0x1f000100 = 0xffffffff). Adoption ungates such a
++		 * subsystem gate below instead of requiring a boot hold.
++		 */
++		if (!scpsys_clock_is_boot_held(pd->subsys_clks[i].clk) &&
++		    !pd->scpsys->boot_on_adoption)
++			return -EHOSTDOWN;
++	}
++
++	/* After this point a failed adoption retains handles until reboot. */
++	pd->boot_retained = true;
++	pd->scpsys->boot_acquisition_started = true;
++	ret = clk_bulk_prepare_enable(pd->num_clks, pd->clks);
++	if (ret)
++		goto fault;
++	if (pd->hwv_data)
++		pd->hwv_clks_held = true;
++	else
++		pd->display_clks_held = true;
++
++	ret = clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks);
++	if (ret)
++		goto fault;
++	if (pd->scpsys->boot_on_adoption && pd->hwv_data) {
++		ret = scpsys_adopt_boot_hwv(pd);
++		if (ret)
++			goto fault;
++	}
++	ret = scpsys_boot_is_on(pd);
++	if (ret)
++		goto fault;
++
++	if (pd->hwv_data) {
++		pd->hwv_supply_held = true;
++		pd->hwv_on = true;
++	} else {
++		pd->display_supply_held = true;
++		pd->display_subsys_held = true;
++		pd->display_on = true;
++	}
++	if (pd->hwv_data || !pd->data) {
++		pd->genpd.flags |= GENPD_FLAG_ALWAYS_ON;
++		pd->genpd.power_on = scpsys_boot_power_on;
++		pd->genpd.power_off = scpsys_boot_power_off;
++	} else {
++		/* Stage 82: real DISP callbacks; OFF gated by disp_power_cycle. */
++		pd->genpd.power_on = scpsys_display_power_on;
++		pd->genpd.power_off = scpsys_display_power_off;
++		/*
++		 * Stage 84b: sync_state never runs for this provider (the DSC node
++		 * is a DT consumer without a bound driver), so genpd's boot stay_on
++		 * would pin DISP on forever. disp_power_cycle (default off) already
++		 * refuses OFF until enabled at runtime.
++		 */
++		pd->genpd.flags |= GENPD_FLAG_NO_STAY_ON;
++	}
++	return 0;
++
++fault:
++	WRITE_ONCE(pd->scpsys->display_faulted, true);
++	WRITE_ONCE(mt6878_boot_power_failed, true);
++	return ret;
++}
++
++static int scpsys_display_poll(struct scpsys_domain *pd, u32 mask, u32 expected)
++{
++	u32 val;
++
++	return regmap_read_poll_timeout(pd->scpsys->base, pd->data->ctl_offs,
++					val, (val & mask) == expected,
++					MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
++}
++
++static int scpsys_display_update(struct scpsys_domain *pd, u32 mask, u32 value)
++{
++	return regmap_update_bits(pd->scpsys->base, pd->data->ctl_offs, mask, value);
++}
++
++/* Only the fixed MT6878 DISP table uses these callbacks. */
++static int scpsys_display_bus(struct scpsys_domain *pd, bool protect)
++{
++	const struct scpsys_bus_prot_data *bpd = &pd->data->bp_cfg[0];
++	struct regmap *map = scpsys_bus_protect_get_regmap(pd, bpd);
++	struct regmap *sta = scpsys_bus_protect_get_sta_regmap(pd, bpd);
++	u32 val;
++	int ret;
++
++	ret = regmap_write(map, protect ? bpd->bus_prot_set : bpd->bus_prot_clr,
++			   bpd->bus_prot_set_clr_mask);
++	/* The vendor DISP table deliberately omits the clear ACK. */
++	if (ret || !protect)
++		return ret;
++	return regmap_read_poll_timeout(sta, bpd->bus_prot_sta, val,
++					(val & bpd->bus_prot_sta_mask) == bpd->bus_prot_sta_mask,
++					MTK_POLL_DELAY_US, MTK_POLL_TIMEOUT);
++}
++
++static int scpsys_display_sram(struct scpsys_domain *pd, bool on)
++{
++	u32 bits = pd->data->sram_pdn_bits;
++	int ret;
++
++	ret = scpsys_display_update(pd, bits, on ? 0 : bits);
++	if (ret)
++		return ret;
++	bits = pd->data->sram_pdn_ack_bits;
++	return scpsys_display_poll(pd, bits, on ? 0 : bits);
++}
++
++/*
++ * Stage 85: LK leaves every display SMI larb port in IOMMU bypass, and the
++ * native scanout pool relies on it. A DISP power cycle resets NON_SEC_CON
++ * (0x380 + 4 * port) bit 0 (MMU_EN) to 1. Restore bypass after power-on.
++ */
++static void scpsys_display_larb_bypass(struct scpsys_domain *pd)
++{
++	static const struct { phys_addr_t base; unsigned int ports; } larbs[] = {
++		{ 0x1401e000, 7 }, { 0x1401f000, 6 },
++	};
++	unsigned int i, p;
++
++	for (i = 0; i < ARRAY_SIZE(larbs); i++) {
++		void __iomem *base = ioremap(larbs[i].base, 0x400);
++
++		if (!base)
++			continue;
++		for (p = 0; p < larbs[i].ports; p++)
++			writel(0, base + 0x380 + 4 * p);
++		iounmap(base);
++	}
++	dev_info(pd->scpsys->dev, "Stage 85: larb0/larb1 ports restored to bypass\n");
++}
++
++static int scpsys_display_power_on(struct generic_pm_domain *genpd)
++{
++	struct scpsys_domain *pd = to_scpsys_domain(genpd);
++	u32 ack = pd->data->sta_mask | pd->data->sta2nd_mask;
++	int ret;
++
++	if (READ_ONCE(pd->scpsys->display_faulted))
++		return -EIO;
++	if (pd->display_on)
++		return 0;
++	ret = scpsys_display_gates(pd, true);
++	if (ret)
++		return scpsys_display_fault(pd, ret);
++	ret = scpsys_regulator_enable(pd->supply);
++	if (ret)
++		return ret;
++	pd->display_supply_held = true;
++	ret = clk_bulk_prepare_enable(pd->num_clks, pd->clks);
++	if (ret)
++		goto fault;
++	pd->display_clks_held = true;
++	ret = scpsys_display_update(pd, PWR_ON_BIT, PWR_ON_BIT);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_ON_2ND_BIT, PWR_ON_2ND_BIT);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_poll(pd, ack, ack);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_CLK_DIS_BIT, 0);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_ISO_BIT, 0);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_RST_B_BIT, PWR_RST_B_BIT);
++	if (ret)
++		goto fault;
++	ret = clk_bulk_prepare_enable(pd->num_subsys_clks, pd->subsys_clks);
++	if (ret)
++		goto fault;
++	pd->display_subsys_held = true;
++	ret = scpsys_display_sram(pd, true);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_bus(pd, false);
++	if (ret)
++		goto fault;
++	pd->display_on = true;
++	if (pd->boot_retained) {
++		/* The vendor DISP CLR has no ACK wait; Android saw it clear in ~7 ms. */
++		usleep_range(10000, 12000);
++		scpsys_display_larb_bypass(pd);
++		/* Stage 86: re-open MMSYS (firmware display-VA) and re-translate RDMA0. */
++		mt6878_disp_iommu_reapply();
++		dev_info(pd->scpsys->dev, "Stage 82: DISP powered on\n");
++	}
++	return 0;
++
++fault:
++	return scpsys_display_fault(pd, ret);
++}
++
++static int scpsys_display_power_off(struct generic_pm_domain *genpd)
++{
++	struct scpsys_domain *pd = to_scpsys_domain(genpd);
++	u32 ack = pd->data->sta_mask | pd->data->sta2nd_mask;
++	int ret;
++
++	if (READ_ONCE(pd->scpsys->display_faulted))
++		return -EIO;
++	if (pd->boot_retained && pd->display_on) {
++		int held;
++
++		if (!READ_ONCE(disp_power_cycle))
++			return -EBUSY;
++		/*
++		 * Stage 86b: after a power cycle the MMSYS crossbar stays locked
++		 * until the display-VA re-run, which needs translated scanout.
++		 * Never power off before the boot-time attach has passed.
++		 */
++		if (!mt6878_disp_iommu_attached())
++			return -EBUSY;
++		/* Refuse before any hardware access unless only our SMI gates remain. */
++		held = mt6878_display_gates_held(pd->subsys_clks[0].clk, false);
++		if (held != pd->num_subsys_clks) {
++			dev_info(pd->scpsys->dev, "Stage 82: DISP off refused, %d gates held (need %u)\n",
++				 held, pd->num_subsys_clks);
++			mt6878_display_gates_held(pd->subsys_clks[0].clk, true);
++			return -EBUSY;
++		}
++		dev_info(pd->scpsys->dev, "Stage 82: DISP power off\n");
++	}
++	ret = scpsys_display_gates(pd, !pd->display_on);
++	if (ret)
++		goto fault;
++	if (!pd->display_on)
++		return 0;
++	ret = scpsys_display_bus(pd, true);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_sram(pd, false);
++	if (ret)
++		goto fault;
++	clk_bulk_disable_unprepare(pd->num_subsys_clks, pd->subsys_clks);
++	pd->display_subsys_held = false;
++	/* Void unprepare cannot report a failed close: consult provider state. */
++	ret = scpsys_display_gates(pd, true);
++	if (ret)
++		goto fault;
++	if (pd->boot_retained) {
++		ret = mt6878_display_gates_power_lost(pd->subsys_clks[0].clk);
++		if (ret)
++			goto fault;
++	}
++	ret = scpsys_display_update(pd, PWR_ISO_BIT, PWR_ISO_BIT);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_CLK_DIS_BIT, PWR_CLK_DIS_BIT);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_RST_B_BIT, 0);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_ON_2ND_BIT, 0);
++	if (ret)
++		goto fault;
++	ret = scpsys_display_update(pd, PWR_ON_BIT, 0);
++	if (ret)
++		goto fault;
++	/* Both ACKs must be clear; one missing ACK is not a powered-off domain. */
++	ret = scpsys_display_poll(pd, ack, 0);
++	if (ret)
++		goto fault;
++	clk_bulk_disable_unprepare(pd->num_clks, pd->clks);
++	pd->display_clks_held = false;
++	ret = scpsys_regulator_disable(pd->supply);
++	if (ret)
++		goto fault;
++	pd->display_supply_held = false;
++	pd->display_on = false;
++	return 0;
++
++fault:
++	return scpsys_display_fault(pd, ret);
++}
++
+ static int scpsys_power_on(struct generic_pm_domain *genpd)
+ {
+ 	struct scpsys_domain *pd = container_of(genpd, struct scpsys_domain, genpd);
+@@ -741,6 +1462,106 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
+ 	return scpsys_power_off_internal(pd);
+ }
+ 
++/* Runtime-PM consumers must pass this even when genpd still reports ON. */
++static int scpsys_display_start(struct device *dev)
++{
++	struct scpsys_domain *pd;
++
++	if (!dev->pm_domain)
++		return -EINVAL;
++	pd = to_scpsys_domain(pd_to_genpd(dev->pm_domain));
++	if (READ_ONCE(pd->scpsys->display_faulted) || READ_ONCE(pd->hwv_faulted))
++		return -EIO;
++	if (pd->hwv_data)
++		return READ_ONCE(pd->hwv_on) && READ_ONCE(pd->hwv_supply_held) &&
++			READ_ONCE(pd->hwv_clks_held) ? 0 : -EHOSTDOWN;
++	return READ_ONCE(pd->display_on) && READ_ONCE(pd->display_supply_held) &&
++		READ_ONCE(pd->display_clks_held) && READ_ONCE(pd->display_subsys_held) ?
++		0 : -EHOSTDOWN;
++}
++
++/* Always succeed: a failed stop would call the driver's resume without start. */
++static int scpsys_display_stop(struct device *dev)
++{
++	return 0;
++}
++
++static int scpsys_display_sleep_check(struct device *dev, struct scpsys_domain **out)
++{
++	struct scpsys_domain *pd;
++
++	if (!dev->pm_domain)
++		return -EINVAL;
++	pd = to_scpsys_domain(pd_to_genpd(dev->pm_domain));
++	if (READ_ONCE(pd->scpsys->display_faulted) || READ_ONCE(pd->hwv_faulted))
++		return -EIO;
++	if (out)
++		*out = pd;
++	return 0;
++}
++
++/* Hibernation (and system sleep unless disp_system_sleep) stays refused. */
++static int scpsys_display_sleep_refuse(struct device *dev)
++{
++	int ret = scpsys_display_sleep_check(dev, NULL);
++
++	return ret ? ret : -EOPNOTSUPP;
++}
++
++static int scpsys_display_sleep_prepare(struct device *dev)
++{
++	struct scpsys_domain *pd;
++	int ret = scpsys_display_sleep_check(dev, &pd);
++
++	if (ret)
++		return ret;
++	if (!READ_ONCE(disp_system_sleep) || !pd->genpd_sleep_prepare)
++		return -EOPNOTSUPP;
++	return pd->genpd_sleep_prepare(dev);
++}
++
++/* Reached only after prepare passed: no genpd power transition here. */
++static int scpsys_display_sleep_suspend_noirq(struct device *dev)
++{
++	int ret = scpsys_display_sleep_check(dev, NULL);
++
++	return ret ? ret : pm_generic_suspend_noirq(dev);
++}
++
++static int scpsys_display_sleep_resume_noirq(struct device *dev)
++{
++	return pm_generic_resume_noirq(dev);
++}
++
++static int scpsys_display_attach(struct generic_pm_domain *genpd, struct device *dev)
++{
++	struct scpsys_domain *pd = to_scpsys_domain(genpd);
++
++#ifdef CONFIG_PM_SLEEP
++	/* Syscore bypasses the system-sleep prepare refusal. */
++	if (dev->power.syscore)
++		return -EOPNOTSUPP;
++#endif
++	return READ_ONCE(pd->scpsys->display_faulted) || READ_ONCE(pd->hwv_faulted) ?
++		-EIO : 0;
++}
++
++static void scpsys_display_install_guards(struct scpsys_domain *pd)
++{
++	pd->genpd.attach_dev = scpsys_display_attach;
++	pd->genpd.dev_ops.start = scpsys_display_start;
++	pd->genpd.dev_ops.stop = scpsys_display_stop;
++	/* Keep genpd's runtime callbacks: its identity checks compare their address. */
++	pd->genpd_sleep_prepare = pd->genpd.domain.ops.prepare;
++	pd->genpd.domain.ops.prepare = scpsys_display_sleep_prepare;
++	pd->genpd.domain.ops.suspend_noirq = scpsys_display_sleep_suspend_noirq;
++	pd->genpd.domain.ops.resume_noirq = scpsys_display_sleep_resume_noirq;
++	pd->genpd.domain.ops.freeze_noirq = scpsys_display_sleep_refuse;
++	pd->genpd.domain.ops.thaw_noirq = scpsys_display_sleep_refuse;
++	pd->genpd.domain.ops.poweroff_noirq = scpsys_display_sleep_refuse;
++	pd->genpd.domain.ops.restore_noirq = scpsys_display_sleep_refuse;
++}
++
+ static struct
+ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_node *node)
+ {
+@@ -749,6 +1570,8 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 	struct scpsys_domain *pd;
+ 	struct property *prop;
+ 	const char *clk_name;
++	bool subsys_seen = false;
++	enum scpsys_mtcmos_type type;
+ 	int i, ret, num_clks;
+ 	struct clk *clk;
+ 	int clk_ind = 0;
+@@ -761,7 +1584,19 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 		return ERR_PTR(-EINVAL);
+ 	}
+ 
+-	switch (scpsys->soc_data->type) {
++	type = scpsys_domain_type(scpsys->soc_data, id);
++	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_MIXED) {
++		struct device_node *parent = of_get_parent(node);
++		u32 parent_id = U32_MAX;
++
++		if (parent != scpsys->dev->of_node)
++			of_property_read_u32(parent, "reg", &parent_id);
++		of_node_put(parent);
++		if (!scpsys_domain_parent_valid(scpsys->soc_data, id, parent_id))
++			return ERR_PTR(-EINVAL);
++	}
++
++	switch (type) {
+ 	case SCPSYS_MTCMOS_TYPE_DIRECT_CTL:
+ 		if (id >= scpsys->soc_data->num_domains) {
+ 			dev_err(scpsys->dev, "%pOF: invalid domain id %d\n", node, id);
+@@ -798,6 +1633,14 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 	pd->data = domain_data;
+ 	pd->hwv_data = hwv_domain_data;
+ 	pd->scpsys = scpsys;
++	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_MIXED && hwv_domain_data) {
++		pd->hwv_base = syscon_regmap_lookup_by_phandle(scpsys->dev->of_node,
++							       "mediatek,hw-voter");
++		if (IS_ERR(pd->hwv_base))
++			return ERR_CAST(pd->hwv_base);
++		if (pd->hwv_base == scpsys->base)
++			return ERR_PTR(-EINVAL);
++	}
+ 
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_DOMAIN_SUPPLY)) {
+ 		pd->supply = devm_of_regulator_get_optional(scpsys->dev, node, "domain");
+@@ -808,18 +1651,31 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 	}
+ 
+ 	num_clks = of_clk_get_parent_count(node);
++	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_MIXED &&
++	    (num_clks <= 0 || of_property_count_strings(node, "clock-names") != num_clks))
++		return ERR_PTR(-EINVAL);
+ 	if (num_clks > 0) {
+ 		/* Calculate number of subsys_clks */
+ 		of_property_for_each_string(node, "clock-names", prop, clk_name) {
+ 			char *subsys;
+ 
+ 			subsys = strchr(clk_name, '-');
+-			if (subsys)
++			if (subsys) {
+ 				pd->num_subsys_clks++;
+-			else
++				subsys_seen = true;
++			} else {
++				if (subsys_seen &&
++				    scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_MIXED)
++					return ERR_PTR(-EINVAL);
+ 				pd->num_clks++;
++			}
+ 		}
+ 
++		if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_MIXED &&
++		    (!pd->num_clks || (domain_data &&
++		     pd->num_subsys_clks < domain_data->min_subsys_clks)))
++			return ERR_PTR(-EINVAL);
++
+ 		pd->clks = devm_kcalloc(scpsys->dev, pd->num_clks, sizeof(*pd->clks), GFP_KERNEL);
+ 		if (!pd->clks)
+ 			return ERR_PTR(-ENOMEM);
+@@ -870,9 +1726,22 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 	else
+ 		pd->genpd.name = node->name;
+ 
+-	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_DIRECT_CTL) {
+-		pd->genpd.power_off = scpsys_power_off;
+-		pd->genpd.power_on = scpsys_power_on;
++	if (type == SCPSYS_MTCMOS_TYPE_DIRECT_CTL) {
++		if (scpsys->soc_data == &mt6878_display_scpsys_data) {
++			if (!scpsys->retain_boot) {
++				ret = scpsys_display_gates(pd, true);
++				if (ret)
++					goto err_put_subsys_clocks;
++			}
++			pd->genpd.power_off = scpsys_display_power_off;
++			pd->genpd.power_on = scpsys_display_power_on;
++		} else {
++			pd->genpd.power_off = scpsys_power_off;
++			pd->genpd.power_on = scpsys_power_on;
++		}
++	} else if (pd->hwv_base) {
++		pd->genpd.power_off = scpsys_mixed_hwv_power_off;
++		pd->genpd.power_on = scpsys_mixed_hwv_power_on;
+ 	} else {
+ 		pd->genpd.power_off = scpsys_hwv_power_off;
+ 		pd->genpd.power_on = scpsys_hwv_power_on;
+@@ -887,7 +1756,17 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 	 * software.  The unused domains will be switched off during
+ 	 * late_init time.
+ 	 */
+-	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
++	if (scpsys->retain_boot) {
++		ret = scpsys_retain_boot(pd);
++		if (ret)
++			goto err_put_subsys_clocks;
++	} else if (MTK_SCPD_CAPS(pd, MTK_SCPD_REQUIRE_OFF)) {
++		ret = scpsys_require_off(pd);
++		if (ret) {
++			dev_err(scpsys->dev, "%pOF: domain must be quiescent/off: %d\n", node, ret);
++			goto err_put_subsys_clocks;
++		}
++	} else if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
+ 		bool domain_is_on;
+ 
+ 		if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_HW_VOTER)
+@@ -912,16 +1791,26 @@ generic_pm_domain *scpsys_add_one_domain(struct scpsys *scpsys, struct device_no
+ 	if (MTK_SCPD_CAPS(pd, MTK_SCPD_ACTIVE_WAKEUP))
+ 		pd->genpd.flags |= GENPD_FLAG_ACTIVE_WAKEUP;
+ 
+-	if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF))
++	if (scpsys->soc_data == &mt6878_display_scpsys_data) {
++		ret = pm_genpd_init(&pd->genpd, NULL, !pd->boot_retained);
++		if (ret)
++			goto err_put_subsys_clocks;
++		scpsys_display_install_guards(pd);
++	} else if (MTK_SCPD_CAPS(pd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
+ 		pm_genpd_init(&pd->genpd, NULL, true);
+-	else
++	} else {
+ 		pm_genpd_init(&pd->genpd, NULL, false);
++	}
+ 
+ 	scpsys->domains[id] = &pd->genpd;
+ 
+ 	return scpsys->pd_data.domains[id];
+ 
+ err_put_subsys_clocks:
++	if (pd->boot_retained) {
++		WRITE_ONCE(mt6878_boot_power_failed, true);
++		return ERR_PTR(ret);
++	}
+ 	clk_bulk_put(pd->num_subsys_clks, pd->subsys_clks);
+ err_put_clocks:
+ 	clk_bulk_put(pd->num_clks, pd->clks);
+@@ -997,7 +1886,15 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
+ 			"failed to remove domain '%s' : %d - state may be inconsistent\n",
+ 			pd->genpd.name, ret);
+ 
+-	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_HW_VOTER) {
++	if (pd->boot_retained) {
++		WRITE_ONCE(mt6878_boot_power_failed, true);
++		/* Preserve acquired clock handles and critical boot references. */
++		return;
++	}
++	if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_MIXED) {
++		/* Probe cleanup: these domains were registered off, never powered. */
++		WARN_ON(pd->hwv_clks_held || pd->hwv_supply_held || pd->hwv_lp_held);
++	} else if (scpsys->soc_data->type == SCPSYS_MTCMOS_TYPE_HW_VOTER) {
+ 		if (scpsys_hwv_domain_is_enable_done(pd))
+ 			scpsys_hwv_power_off_internal(pd);
+ 	} else {
+@@ -1013,10 +1910,13 @@ static void scpsys_domain_cleanup(struct scpsys *scpsys)
+ {
+ 	struct generic_pm_domain *genpd;
+ 	struct scpsys_domain *pd;
+-	int i;
++	unsigned int count = scpsys->pd_data.num_domains;
++	unsigned int i, id;
+ 
+-	for (i = scpsys->pd_data.num_domains - 1; i >= 0; i--) {
+-		genpd = scpsys->pd_data.domains[i];
++	/* Removing retained MM_INFRA (7) first unlinks DISP (8). */
++	for (i = 0; i < count; i++) {
++		id = scpsys->retain_boot ? i : count - 1 - i;
++		genpd = scpsys->pd_data.domains[id];
+ 		if (genpd) {
+ 			pd = to_scpsys_domain(genpd);
+ 			scpsys_remove_one_domain(pd);
+@@ -1178,6 +2078,14 @@ static const struct of_device_id scpsys_of_match[] = {
+ 		.compatible = "mediatek,mt6795-power-controller",
+ 		.data = &mt6795_scpsys_data,
+ 	},
++	{
++		.compatible = "mediatek,mt6878-display-power-controller",
++		.data = &mt6878_display_scpsys_data,
++	},
++	{
++		.compatible = "mediatek,mt6878-power-controller",
++		.data = &mt6878_scpsys_data,
++	},
+ 	{
+ 		.compatible = "mediatek,mt6893-power-controller",
+ 		.data = &mt6893_scpsys_data,
+@@ -1248,7 +2156,10 @@ static int scpsys_probe(struct platform_device *pdev)
+ 		return -EINVAL;
+ 	}
+ 
+-	num_domains = soc->num_domains + soc->num_hwv_domains;
++	if (soc->type == SCPSYS_MTCMOS_TYPE_MIXED)
++		num_domains = max(soc->num_domains, soc->num_hwv_domains);
++	else
++		num_domains = soc->num_domains + soc->num_hwv_domains;
+ 
+ 	scpsys = devm_kzalloc(dev, struct_size(scpsys, domains, num_domains), GFP_KERNEL);
+ 	if (!scpsys)
+@@ -1256,6 +2167,15 @@ static int scpsys_probe(struct platform_device *pdev)
+ 
+ 	scpsys->dev = dev;
+ 	scpsys->soc_data = soc;
++	scpsys->retain_boot = of_property_read_bool(np, "mediatek,retain-boot-display");
++	scpsys->boot_on_adoption = scpsys->retain_boot &&
++		of_property_read_bool(np, "mediatek,boot-on-adoption");
++	if (scpsys->retain_boot) {
++		if (soc != &mt6878_display_scpsys_data)
++			return -EINVAL;
++		if (READ_ONCE(mt6878_boot_power_failed))
++			return -EIO;
++	}
+ 
+ 	scpsys->pd_data.domains = scpsys->domains;
+ 	scpsys->pd_data.num_domains = num_domains;
+@@ -1300,6 +2220,12 @@ static int scpsys_probe(struct platform_device *pdev)
+ 		return ret;
+ 	}
+ 
++	if (soc->type == SCPSYS_MTCMOS_TYPE_MIXED &&
++	    !scpsys_domain_hierarchy_complete(scpsys)) {
++		ret = -EINVAL;
++		goto err_cleanup_domains;
++	}
++
+ 	ret = of_genpd_add_provider_onecell(np, &scpsys->pd_data);
+ 	if (ret) {
+ 		dev_err(dev, "failed to add provider: %d\n", ret);
+@@ -1309,6 +2235,8 @@ static int scpsys_probe(struct platform_device *pdev)
+ 	return 0;
+ 
+ err_cleanup_domains:
++	if (scpsys->retain_boot && scpsys->boot_acquisition_started)
++		WRITE_ONCE(mt6878_boot_power_failed, true);
+ 	scpsys_domain_cleanup(scpsys);
+ 	return ret;
+ }
+diff --git a/drivers/pmdomain/mediatek/mtk-pm-domains.h b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+index a5dca24cb..ee6c0da3d 100644
+--- a/drivers/pmdomain/mediatek/mtk-pm-domains.h
++++ b/drivers/pmdomain/mediatek/mtk-pm-domains.h
+@@ -17,6 +17,8 @@
+ #define MTK_SCPD_MODEM_PWRSEQ		BIT(10)
+ #define MTK_SCPD_SKIP_RESET_B		BIT(11)
+ #define MTK_SCPD_INFRA_PWR_CTL		BIT(12)
++/* With KEEP_DEFAULT_OFF: reject firmware-on or transitioning domains at probe. */
++#define MTK_SCPD_REQUIRE_OFF		BIT(13)
+ #define MTK_SCPD_CAPS(_scpd, _x)	((_scpd)->data ?		\
+ 					 (_scpd)->data->caps & (_x) :	\
+ 					 (_scpd)->hwv_data->caps & (_x))
+@@ -137,11 +139,13 @@ enum scpsys_rtff_type {
+  * enum scpsys_mtcmos_type - Type of power domain controller
+  * @SCPSYS_MTCMOS_TYPE_DIRECT_CTL: Power domains are controlled with direct access
+  * @SCPSYS_MTCMOS_TYPE_HW_VOTER:   Hardware-assisted voted power domain control
++ * @SCPSYS_MTCMOS_TYPE_MIXED:      Direct and voted domains in one ID namespace
+  * @SCPSYS_MTCMOS_TYPE_MAX:        Number of supported power domain types
+  */
+ enum scpsys_mtcmos_type {
+ 	SCPSYS_MTCMOS_TYPE_DIRECT_CTL = 0,
+ 	SCPSYS_MTCMOS_TYPE_HW_VOTER,
++	SCPSYS_MTCMOS_TYPE_MIXED,
+ 	SCPSYS_MTCMOS_TYPE_MAX
+ };
+ 
+@@ -153,6 +157,7 @@ enum scpsys_mtcmos_type {
+  * @ctl_offs: The offset for main power control register.
+  * @sram_pdn_bits: The mask for sram power control bits.
+  * @sram_pdn_ack_bits: The mask for sram power control acked bits.
++ * @min_subsys_clks: Minimum subsystem clocks for a mixed domain.
+  * @ext_buck_iso_offs: The offset for external buck isolation
+  * @ext_buck_iso_mask: The mask for external buck isolation
+  * @caps: The flag for active wake-up action.
+@@ -166,6 +171,7 @@ struct scpsys_domain_data {
+ 	int ctl_offs;
+ 	u32 sram_pdn_bits;
+ 	u32 sram_pdn_ack_bits;
++	u8 min_subsys_clks;
+ 	int ext_buck_iso_offs;
+ 	u32 ext_buck_iso_mask;
+ 	u16 caps;
+@@ -201,6 +207,11 @@ struct scpsys_hwv_domain_data {
+ 	u16 caps;
+ };
+ 
++struct scpsys_domain_parent {
++	u32 parent;
++	u32 child;
++};
++
+ struct scpsys_soc_data {
+ 	const struct scpsys_domain_data *domains_data;
+ 	int num_domains;
+@@ -209,6 +220,8 @@ struct scpsys_soc_data {
+ 	enum scpsys_bus_prot_block *bus_prot_blocks;
+ 	int num_bus_prot_blocks;
+ 	enum scpsys_mtcmos_type type;
++	const struct scpsys_domain_parent *parents;
++	unsigned int num_parents;
+ };
+ 
+ #endif /* __SOC_MEDIATEK_MTK_PM_DOMAINS_H */
+-- 
+2.53.0
+

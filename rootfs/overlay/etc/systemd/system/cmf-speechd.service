@@ -1,0 +1,14 @@
+[Unit]
+Description=CMF Phone 1 voice-call audio bridge (t2-speechd over CCCI)
+After=systemd-udevd.service sound.target
+Before=ModemManager.service
+ConditionPathExists=/usr/local/lib/cmf-modem/t2-speechd
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -c /dev/ccci_aud ] && [ -c /dev/ccci_raw_audio ] && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/local/lib/cmf-modem/t2-speechd -d /dev/ccci_aud -m /dev/ccci_raw_audio -S none -a -c hw:C1 -P hw:C1,2 -f 48000 -r 0 -A 0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

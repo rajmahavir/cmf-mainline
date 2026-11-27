@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+&{/soc@0} {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	cmf_md_emi: syscon@10270000 {
+		compatible = "mediatek,mt6878-nemicfg-ao-mem", "syscon";
+		reg = <0x10270000 0x1000>;
+	};
+};
+
+&md_resources {
+	compatible = "cmf,mt6878-switchable-modem-resources";
+	mediatek,infracfg = <&cmf_infra_ao>;
+	mediatek,nemicfg = <&cmf_md_emi>;
+};
+
+&md_digrf {
+	regulator-min-microvolt = <300000>;
+	regulator-max-microvolt = <1193750>;
+};
+&md_modem {
+	regulator-min-microvolt = <300000>;
+	regulator-max-microvolt = <1193750>;
+};
+&md_sram {
+	regulator-min-microvolt = <400000>;
+	regulator-max-microvolt = <1193750>;
+};

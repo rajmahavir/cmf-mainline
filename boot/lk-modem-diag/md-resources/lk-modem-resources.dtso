@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+&{/soc@0/spmi@1cc04000/pmic@4} {
+	md_resources: modem-resources {
+		compatible = "cmf,mt6878-lk-modem-resources";
+		#power-domain-cells = <0>;
+		mediatek,scpsys = <&cmf_gpu_spm>;
+
+		md_digrf: vbuck1 { regulator-name = "mt6363_vbuck1"; };
+		md_modem: vbuck2 { regulator-name = "mt6363_vbuck2"; };
+		md_sram: vsram-modem { regulator-name = "mt6363_vsram_modem"; };
+	};
+};
+
+&{/soc@0/mddriver@d180000} {
+	md-vdigrf-supply = <&md_digrf>;
+	md-vmodem-supply = <&md_modem>;
+	md-vsram-supply = <&md_sram>;
+	mediatek,modem-power-domain = <&md_resources>;
+	mediatek,topckgen = <&cmf_md_topckgen>;
+};

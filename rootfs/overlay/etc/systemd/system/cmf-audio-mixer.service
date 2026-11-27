@@ -1,0 +1,12 @@
+[Unit]
+Description=CMF Phone 1 audio routing (speaker, earpiece, microphones)
+After=sound.target systemd-udevd.service
+Before=graphical.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cmf-audio-mixer
+
+[Install]
+WantedBy=multi-user.target

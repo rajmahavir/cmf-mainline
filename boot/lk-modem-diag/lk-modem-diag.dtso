@@ -1,0 +1,12 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+&{/chosen} {
+    cmf,lk-modem-record-length = <0>;
+    cmf,lk-modem-diagnostic = [
+        75 6e 77 72 69 74 74 65 6e 00 00 00 00 00 00 00
+        00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+        00 00 00 00 00 00 00 00
+    ]; // "unwritten", padded to 40 bytes
+};

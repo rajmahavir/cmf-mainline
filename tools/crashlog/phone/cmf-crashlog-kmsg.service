@@ -1,0 +1,14 @@
+# CMF: stream the kernel log to your log receiver (UDP 5514) as it
+# is written, so a hang or watchdog reset leaves its last lines off-device.
+# RAM pstore does not survive resets on this phone.
+[Unit]
+Description=CMF crash log: stream /dev/kmsg to your log receiver
+After=tailscaled.service network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/bin/bash -c "exec 3>/dev/udp/RECEIVER_IP/5514; exec stdbuf -oL cat /dev/kmsg >&3"
+Restart=always
+RestartSec=3
+Nice=-5
+[Install]
+WantedBy=multi-user.target

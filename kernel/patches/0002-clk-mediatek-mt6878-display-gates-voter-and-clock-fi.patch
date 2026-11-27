@@ -1,0 +1,2247 @@
+From a52b4f1b4abc972b383e5f4f9b892cf2f05fb39b Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:09 +0000
+Subject: [PATCH 02/13] clk: mediatek: mt6878: display gates, voter and clock
+ fixes
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ drivers/clk/clk.c                             |  61 ++
+ drivers/clk/mediatek/Kconfig                  |  15 +
+ drivers/clk/mediatek/Makefile                 |   6 +
+ drivers/clk/mediatek/clk-mt6685-audclk.c      | 133 ++++
+ drivers/clk/mediatek/clk-mt6878-ccif.c        |  83 +++
+ .../clk/mediatek/clk-mt6878-display-gates.c   | 641 ++++++++++++++++++
+ .../clk/mediatek/clk-mt6878-display-voter.c   | 537 +++++++++++++++
+ drivers/clk/mediatek/clk-mt6878-gce.c         | 352 ++++++++++
+ drivers/clk/mediatek/clk-mt6878-mdp.c         |  62 ++
+ drivers/clk/mediatek/clk-mt6878-mm.c          | 129 ++++
+ drivers/clk/mediatek/clk-mt6878-topckgen.c    |   4 +-
+ include/linux/clk-provider.h                  |   2 +
+ .../linux/soc/mediatek/mt6878-display-gates.h |  40 ++
+ .../linux/soc/mediatek/mt6878-display-voter.h |  23 +
+ 14 files changed, 2086 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/clk/mediatek/clk-mt6685-audclk.c
+ create mode 100644 drivers/clk/mediatek/clk-mt6878-ccif.c
+ create mode 100644 drivers/clk/mediatek/clk-mt6878-display-gates.c
+ create mode 100644 drivers/clk/mediatek/clk-mt6878-display-voter.c
+ create mode 100644 drivers/clk/mediatek/clk-mt6878-gce.c
+ create mode 100644 drivers/clk/mediatek/clk-mt6878-mdp.c
+ create mode 100644 drivers/clk/mediatek/clk-mt6878-mm.c
+ create mode 100644 include/linux/soc/mediatek/mt6878-display-gates.h
+ create mode 100644 include/linux/soc/mediatek/mt6878-display-voter.h
+
+diff --git a/drivers/clk/clk.c b/drivers/clk/clk.c
+index 048adfa86..93dd18ebe 100644
+--- a/drivers/clk/clk.c
++++ b/drivers/clk/clk.c
+@@ -4509,6 +4509,67 @@ static const struct clk_ops clk_nodrv_ops = {
+ 	.set_parent	= clk_nodrv_set_parent,
+ };
+ 
++/**
++ * clk_bulk_prepare_enable_if_active - take references to held clock trees
++ * @num_clks: number of clocks
++ * @clks: clocks to acquire
++ *
++ * Require an existing prepare and enable reference at the root of each
++ * resolved tree. A clock below it may be unheld if taking its first
++ * reference needs neither runtime PM nor prepare/enable operations.
++ * Acquire the entire set without invoking those provider operations.
++ * This checks framework ownership, not hardware state.
++ *
++ * Call in sleepable context. Balance success with clk_bulk_disable_unprepare().
++ * Return: 0 on success, -EINVAL for a missing clock, or -EAGAIN if a tree
++ * has no held root, requires provider operations, or is unresolved or
++ * unregistered. Errors leave references unchanged.
++ */
++int clk_bulk_prepare_enable_if_active(int num_clks, const struct clk_bulk_data *clks)
++{
++	struct clk_core *core;
++	unsigned long flags;
++	int i, ret = 0;
++
++	clk_prepare_lock();
++	flags = clk_enable_lock();
++
++	for (i = 0; i < num_clks; i++) {
++		if (IS_ERR_OR_NULL(clks[i].clk)) {
++			ret = -EINVAL;
++			goto out_unlock;
++		}
++
++		for (core = clks[i].clk->core; core; core = core->parent) {
++			if (core->orphan || core->ops == &clk_nodrv_ops) {
++				ret = -EAGAIN;
++				goto out_unlock;
++			}
++			if (core->prepare_count && core->enable_count)
++				continue;
++			if (!core->parent || core->rpm_enabled ||
++			    core->ops->prepare || core->ops->unprepare ||
++			    core->ops->enable || core->ops->disable) {
++				ret = -EAGAIN;
++				goto out_unlock;
++			}
++		}
++	}
++
++	/* Both walks can only take references through callback-free paths. */
++	for (i = 0; i < num_clks; i++) {
++		core = clks[i].clk->core;
++		clk_core_prepare(core);
++		clk_core_enable(core);
++	}
++
++out_unlock:
++	clk_enable_unlock(flags);
++	clk_prepare_unlock();
++	return ret;
++}
++EXPORT_SYMBOL_GPL(clk_bulk_prepare_enable_if_active);
++
+ static void clk_core_evict_parent_cache_subtree(struct clk_core *root,
+ 						const struct clk_core *target)
+ {
+diff --git a/drivers/clk/mediatek/Kconfig b/drivers/clk/mediatek/Kconfig
+index 9bf902299..392f04937 100644
+--- a/drivers/clk/mediatek/Kconfig
++++ b/drivers/clk/mediatek/Kconfig
+@@ -381,6 +381,21 @@ config COMMON_CLK_MT6878
+ 	help
+ 	  This driver supports MediaTek MT6878 basic clocks.
+ 
++config COMMON_CLK_MT6878_CCIF
++	tristate "Clock driver for MediaTek MT6878 CCIF (modem) gates"
++	depends on COMMON_CLK_MT6878
++	help
++	  CCIF/modem interface clock gates for MT6878 (CMF Phone).
++
++config COMMON_CLK_MT6878_GCE
++	bool "MediaTek MT6878 display GCE clocks"
++	depends on COMMON_CLK_MT6878 && PM && PM_GENERIC_DOMAINS && OF
++	help
++	  Enable the native hardware-voted core and timer clocks for the
++	  MT6878 display GCE. The consumer must activate the clock provider
++	  in MM_INFRA before preparing either clock.
++	  The core and timer have separate hardware-voter registers.
++
+ config COMMON_CLK_MT7622
+ 	tristate "Clock driver for MediaTek MT7622"
+ 	depends on ARCH_MEDIATEK || COMPILE_TEST
+diff --git a/drivers/clk/mediatek/Makefile b/drivers/clk/mediatek/Makefile
+index 35e41e506..75ab36ea6 100644
+--- a/drivers/clk/mediatek/Makefile
++++ b/drivers/clk/mediatek/Makefile
+@@ -35,6 +35,10 @@ obj-$(CONFIG_COMMON_CLK_MT6797_MMSYS) += clk-mt6797-mm.o
+ obj-$(CONFIG_COMMON_CLK_MT6797_VDECSYS) += clk-mt6797-vdec.o
+ obj-$(CONFIG_COMMON_CLK_MT6797_VENCSYS) += clk-mt6797-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT6878) += clk-mt6878-apmixedsys.o clk-mt6878-topckgen.o clk-mt6878-peri_ao.o clk-mt6878-ufs_ao.o clk-mt6878-ufs_pdn.o clk-mt6878-imp_iic_wrap.o
++obj-$(CONFIG_COMMON_CLK_MT6878) += clk-mt6878-mm.o clk-mt6878-display-voter.o
++obj-$(CONFIG_COMMON_CLK_MT6878) += clk-mt6878-mm.o clk-mt6878-mdp.o clk-mt6878-display-voter.o clk-mt6878-display-gates.o
++obj-$(CONFIG_COMMON_CLK_MT6878_GCE) += clk-mt6878-gce.o
++obj-$(CONFIG_COMMON_CLK_MT6878_CCIF) += clk-mt6878-ccif.o
+ obj-$(CONFIG_COMMON_CLK_MT2701) += clk-mt2701.o
+ obj-$(CONFIG_COMMON_CLK_MT2701_AUDSYS) += clk-mt2701-aud.o
+ obj-$(CONFIG_COMMON_CLK_MT2701_BDPSYS) += clk-mt2701-bdp.o
+@@ -173,3 +177,5 @@ obj-$(CONFIG_COMMON_CLK_MT8365_VDEC) += clk-mt8365-vdec.o
+ obj-$(CONFIG_COMMON_CLK_MT8365_VENC) += clk-mt8365-venc.o
+ obj-$(CONFIG_COMMON_CLK_MT8516) += clk-mt8516-apmixedsys.o clk-mt8516.o
+ obj-$(CONFIG_COMMON_CLK_MT8516_AUDSYS) += clk-mt8516-aud.o
++
++obj-$(CONFIG_SND_SOC_MT6878_CMF) += clk-mt6685-audclk.o
+diff --git a/drivers/clk/mediatek/clk-mt6685-audclk.c b/drivers/clk/mediatek/clk-mt6685-audclk.c
+new file mode 100644
+index 000000000..0dcaddba7
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6685-audclk.c
+@@ -0,0 +1,133 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * MediaTek MT6685 audio clock buffer
++ *
++ * The MT6685 clock buffer chip feeds the 26 MHz reference of the audio
++ * codec of the second PMIC (MT6369 on MT6878 phones) from its external
++ * buffer BBCK5. Unlike the RF/BB buffers, which follow the SRCLKEN
++ * signals, the audio buffer is switched by software: mode "register
++ * controlled" and the manual enable bit. The codec has no other clock for
++ * its digital part and the MTKAIF link to the AFE.
++ *
++ * Register layout from the MediaTek downstream driver
++ * (drivers/mfd/mt6685-audclk.c, Copyright (c) 2021 MediaTek Inc., author
++ * Ting-Fang Hou).
++ *
++ * Copyright (c) 2026 serlk <22211586+Serlk@users.noreply.github.com>
++ */
++
++#include <linux/clk-provider.h>
++#include <linux/delay.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++
++#define MT6685_DCXO_EXTBUF5_CW0		0x79e
++/* 0: controlled by XO_BBCK5_EN_M, 1: EN_BB, 2: CLK_SEL */
++#define XO_BBCK5_MODE_MASK		GENMASK(1, 0)
++#define XO_BBCK5_MODE_REG		0
++#define XO_BBCK5_EN_M			BIT(2)
++
++/* the downstream driver waits this long after switching the buffer on */
++#define XO_BBCK5_SETTLE_US		400
++
++struct mt6685_audclk {
++	struct clk_hw hw;
++	struct regmap *regmap;
++};
++
++static struct mt6685_audclk *to_audclk(struct clk_hw *hw)
++{
++	return container_of(hw, struct mt6685_audclk, hw);
++}
++
++static int mt6685_audclk_prepare(struct clk_hw *hw)
++{
++	struct mt6685_audclk *ac = to_audclk(hw);
++	int ret;
++
++	ret = regmap_update_bits(ac->regmap, MT6685_DCXO_EXTBUF5_CW0,
++				 XO_BBCK5_MODE_MASK | XO_BBCK5_EN_M,
++				 XO_BBCK5_MODE_REG | XO_BBCK5_EN_M);
++	if (ret)
++		return ret;
++
++	usleep_range(XO_BBCK5_SETTLE_US, XO_BBCK5_SETTLE_US + 20);
++
++	return 0;
++}
++
++static void mt6685_audclk_unprepare(struct clk_hw *hw)
++{
++	struct mt6685_audclk *ac = to_audclk(hw);
++
++	regmap_update_bits(ac->regmap, MT6685_DCXO_EXTBUF5_CW0,
++			   XO_BBCK5_EN_M, 0);
++}
++
++static int mt6685_audclk_is_prepared(struct clk_hw *hw)
++{
++	struct mt6685_audclk *ac = to_audclk(hw);
++	unsigned int val;
++
++	if (regmap_read(ac->regmap, MT6685_DCXO_EXTBUF5_CW0, &val))
++		return 0;
++
++	return (val & XO_BBCK5_MODE_MASK) == XO_BBCK5_MODE_REG &&
++	       (val & XO_BBCK5_EN_M);
++}
++
++static const struct clk_ops mt6685_audclk_ops = {
++	.prepare = mt6685_audclk_prepare,
++	.unprepare = mt6685_audclk_unprepare,
++	.is_prepared = mt6685_audclk_is_prepared,
++};
++
++static int mt6685_audclk_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct clk_init_data init = {
++		.name = "mt6685_xo_bbck5",
++		.ops = &mt6685_audclk_ops,
++		.flags = CLK_IGNORE_UNUSED,
++	};
++	struct mt6685_audclk *ac;
++	int ret;
++
++	ac = devm_kzalloc(dev, sizeof(*ac), GFP_KERNEL);
++	if (!ac)
++		return -ENOMEM;
++
++	ac->regmap = dev_get_regmap(dev->parent, NULL);
++	if (!ac->regmap)
++		return dev_err_probe(dev, -ENODEV, "no MT6685 regmap\n");
++
++	of_property_read_string(dev->of_node, "clock-output-names", &init.name);
++	ac->hw.init = &init;
++
++	ret = devm_clk_hw_register(dev, &ac->hw);
++	if (ret)
++		return ret;
++
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, &ac->hw);
++}
++
++static const struct of_device_id mt6685_audclk_of_match[] = {
++	{ .compatible = "mediatek,mt6685-audclk" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mt6685_audclk_of_match);
++
++static struct platform_driver mt6685_audclk_driver = {
++	.probe = mt6685_audclk_probe,
++	.driver = {
++		.name = "mt6685-audclk",
++		.of_match_table = mt6685_audclk_of_match,
++	},
++};
++module_platform_driver(mt6685_audclk_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6685 audio clock buffer (BBCK5)");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/clk/mediatek/clk-mt6878-ccif.c b/drivers/clk/mediatek/clk-mt6878-ccif.c
+new file mode 100644
+index 000000000..c591001da
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6878-ccif.c
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * CCIF subset of the MT6878 infra AO gates.
++ * Copyright (c) 2023 MediaTek Inc.
++ */
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++static const struct mtk_gate_regs ifrao1 = {
++	.set_ofs = 0x88,
++	.clr_ofs = 0x8c,
++	.sta_ofs = 0x94,
++};
++
++static const struct mtk_gate_regs ifrao3 = {
++	.set_ofs = 0xc0,
++	.clr_ofs = 0xc4,
++	.sta_ofs = 0xc8,
++};
++
++static const struct mtk_gate_regs ifrao2 = {
++	.set_ofs = 0xa4,
++	.clr_ofs = 0xa8,
++	.sta_ofs = 0xac,
++};
++
++static const struct mtk_gate_regs ifrao4 = {
++	.set_ofs = 0xe0,
++	.clr_ofs = 0xe4,
++	.sta_ofs = 0xe8,
++};
++
++/* Preserve the bootloader's gate settings until the CCCI driver takes ownership. */
++#define INFRA_GATE(_id, _name, _parent, _bank, _bit) { \
++	.id = (_id), \
++	.name = (_name), \
++	.parent_name = (_parent), \
++	.regs = &(_bank), \
++	.shift = (_bit), \
++	.ops = &mtk_clk_gate_ops_setclr, \
++	.flags = CLK_IGNORE_UNUSED, \
++}
++
++static const struct mtk_gate ccif_gates[] = {
++	INFRA_GATE(0, "ifrao_ccif_ap", "axi_ck", ifrao1, 23),
++	INFRA_GATE(1, "ifrao_ccif_md", "axi_ck", ifrao1, 26),
++	INFRA_GATE(2, "ifrao_ccif1_ap", "axi_ck", ifrao1, 12),
++	INFRA_GATE(3, "ifrao_ccif1_md", "axi_ck", ifrao1, 13),
++	INFRA_GATE(4, "ifrao_ccif4_md", "axi_ck", ifrao3, 29),
++	INFRA_GATE(5, "ifrao_ccif5_md", "axi_ck", ifrao3, 10),
++	INFRA_GATE(6, "ifrao_dpmaif_main", "dpmaif_main_ck", ifrao3, 26),
++	INFRA_GATE(7, "ifrao_cldmabclk", "axi_ck", ifrao2, 3),
++	INFRA_GATE(8, "ifrao_dpmaif_26m", "f26m_ck", ifrao4, 17),
++};
++
++static const struct mtk_clk_desc ccif_desc = {
++	.clks = ccif_gates,
++	.num_clks = ARRAY_SIZE(ccif_gates),
++};
++
++static const struct of_device_id ccif_matches[] = {
++	{ .compatible = "mediatek,mt6878-ccif-clocks", .data = &ccif_desc },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, ccif_matches);
++
++static struct platform_driver ccif_driver = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6878-ccif",
++		.of_match_table = ccif_matches,
++	},
++};
++module_platform_driver(ccif_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6878 CCIF clock gates");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/clk/mediatek/clk-mt6878-display-gates.c b/drivers/clk/mediatek/clk-mt6878-display-gates.c
+new file mode 100644
+index 000000000..cd985e57a
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6878-display-gates.c
+@@ -0,0 +1,641 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6878 display gates with independent, cold registration. */
++
++#include <dt-bindings/clock/mediatek,mt6878-clock.h>
++#include <dt-bindings/clock/mediatek,mt6878-display-gates.h>
++#include <dt-bindings/clock/mediatek,mt6878-display-voter.h>
++#include <linux/atomic.h>
++#include <linux/clk.h>
++#include <linux/clk-provider.h>
++#include <linux/err.h>
++#include <linux/init.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/list.h>
++#include <linux/mfd/syscon.h>
++#include <linux/mutex.h>
++#include <linux/of_address.h>
++#include <linux/of_clk.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++#include <linux/soc/mediatek/mt6878-display-gates.h>
++
++#define MT6878_DISP_CTL		0xe70
++#define MT6878_DISP_ON		(BIT(0) | BIT(2) | BIT(3) | BIT(30) | BIT(31))
++#define MT6878_DISP_BLOCKED	(BIT(1) | BIT(4))
++#define MT6878_GATE_COUNT	(CLK_MM_NR_CLK + CLK_MDP_NR_CLK)
++
++struct mt6878_gate_desc {
++	const char *name;
++	u32 status;
++	u32 mask;
++	bool mdp;
++};
++
++static bool mt6878_boot_gates_attempted;
++static LIST_HEAD(mt6878_gate_blocks);
++static DEFINE_MUTEX(mt6878_gate_blocks_lock);
++
++struct mt6878_gate_block {
++	struct list_head entry;
++	struct clk_hw_onecell_data *clocks;
++	atomic_t held_count;
++	bool faulted;
++	struct device *dev;
++	struct regmap *spm;
++	struct regmap *mm;
++	struct regmap *mdp;
++	struct clk *parent;
++};
++
++struct mt6878_display_gate {
++	struct clk_hw hw;
++	struct mt6878_gate_block *block;
++	const struct mt6878_gate_desc *desc;
++	bool held;
++	bool faulted;
++	bool boot_retained;
++};
++
++#define MM_GATE(_name, _status, _bit) \
++	{ .name = _name, .status = _status, .mask = BIT(_bit) }
++#define MDP_GATE(_name, _bit) \
++	{ .name = _name, .status = 0x100, .mask = BIT(_bit), .mdp = true }
++
++static const struct mt6878_gate_desc mt6878_gates[] = {
++	[CLK_MM_DISP_OVL0_2L] = MM_GATE("native_mm_disp_ovl0_2l", 0x100, 0),
++	[CLK_MM_DISP_OVL1_2L] = MM_GATE("native_mm_disp_ovl1_2l", 0x100, 1),
++	[CLK_MM_DISP_OVL2_2L] = MM_GATE("native_mm_disp_ovl2_2l", 0x100, 2),
++	[CLK_MM_DISP_OVL3_2L] = MM_GATE("native_mm_disp_ovl3_2l", 0x100, 3),
++	[CLK_MM_DISP_UFBC_WDMA0] = MM_GATE("native_mm_disp_ufbc_wdma0", 0x100, 4),
++	[CLK_MM_DISP_RSZ1] = MM_GATE("native_mm_disp_rsz1", 0x100, 5),
++	[CLK_MM_DISP_RSZ0] = MM_GATE("native_mm_disp_rsz0", 0x100, 6),
++	[CLK_MM_DISP_TDSHP0] = MM_GATE("native_mm_disp_tdshp0", 0x100, 7),
++	[CLK_MM_DISP_C3D0] = MM_GATE("native_mm_disp_c3d0", 0x100, 8),
++	[CLK_MM_DISP_COLOR0] = MM_GATE("native_mm_disp_color0", 0x100, 9),
++	[CLK_MM_DISP_CCORR0] = MM_GATE("native_mm_disp_ccorr0", 0x100, 10),
++	[CLK_MM_DISP_CCORR1] = MM_GATE("native_mm_disp_ccorr1", 0x100, 11),
++	[CLK_MM_DISP_AAL0] = MM_GATE("native_mm_disp_aal0", 0x100, 12),
++	[CLK_MM_DISP_GAMMA0] = MM_GATE("native_mm_disp_gamma0", 0x100, 13),
++	[CLK_MM_DISP_POSTMASK0] = MM_GATE("native_mm_disp_postmask0", 0x100, 14),
++	[CLK_MM_DISP_DITHER0] = MM_GATE("native_mm_disp_dither0", 0x100, 15),
++	[CLK_MM_DISP_TDSHP1] = MM_GATE("native_mm_disp_tdshp1", 0x100, 16),
++	[CLK_MM_DISP_C3D1] = MM_GATE("native_mm_disp_c3d1", 0x100, 17),
++	[CLK_MM_DISP_CCORR2] = MM_GATE("native_mm_disp_ccorr2", 0x100, 18),
++	[CLK_MM_DISP_CCORR3] = MM_GATE("native_mm_disp_ccorr3", 0x100, 19),
++	[CLK_MM_DISP_GAMMA1] = MM_GATE("native_mm_disp_gamma1", 0x100, 20),
++	[CLK_MM_DISP_DITHER1] = MM_GATE("native_mm_disp_dither1", 0x100, 21),
++	[CLK_MM_DISP_SPLITTER0] = MM_GATE("native_mm_disp_splitter0", 0x100, 22),
++	[CLK_MM_DISP_DSC_WRAP0] = MM_GATE("native_mm_disp_dsc_wrap0", 0x100, 23),
++	[CLK_MM_DISP_DSI0] = MM_GATE("native_mm_disp_dsi0", 0x100, 24),
++	[CLK_MM_DISP_DSI1] = MM_GATE("native_mm_disp_dsi1", 0x100, 25),
++	[CLK_MM_DISP_WDMA1] = MM_GATE("native_mm_disp_wdma1", 0x100, 26),
++	[CLK_MM_DISP_APB_BUS] = MM_GATE("native_mm_disp_apb_bus", 0x100, 27),
++	[CLK_MM_DISP_FAKE_ENG0] = MM_GATE("native_mm_disp_fake_eng0", 0x100, 28),
++	[CLK_MM_DISP_FAKE_ENG1] = MM_GATE("native_mm_disp_fake_eng1", 0x100, 29),
++	[CLK_MM_DISP_MUTEX0] = MM_GATE("native_mm_disp_mutex0", 0x100, 30),
++	[CLK_MM_SMI_COMMON] = MM_GATE("native_mm_smi_common", 0x100, 31),
++	[CLK_MM_DSI0] = MM_GATE("native_mm_dsi0_ck", 0x110, 0),
++	[CLK_MM_DSI1] = MM_GATE("native_mm_dsi1_ck", 0x110, 1),
++	[CLK_MM_26M] = MM_GATE("native_mm_26m_ck", 0x110, 11),
++	[CLK_MM_NR_CLK + CLK_MDP_MUTEX0] = MDP_GATE("native_mdp_mutex0", 0),
++	[CLK_MM_NR_CLK + CLK_MDP_APB_BUS] = MDP_GATE("native_mdp_apb_bus", 1),
++	[CLK_MM_NR_CLK + CLK_MDP_SMI0] = MDP_GATE("native_mdp_smi0", 2),
++	[CLK_MM_NR_CLK + CLK_MDP_RDMA0] = MDP_GATE("native_mdp_rdma0", 3),
++	[CLK_MM_NR_CLK + CLK_MDP_HDR0] = MDP_GATE("native_mdp_hdr0", 5),
++	[CLK_MM_NR_CLK + CLK_MDP_AAL0] = MDP_GATE("native_mdp_aal0", 6),
++	[CLK_MM_NR_CLK + CLK_MDP_RSZ0] = MDP_GATE("native_mdp_rsz0", 7),
++	[CLK_MM_NR_CLK + CLK_MDP_TDSHP0] = MDP_GATE("native_mdp_tdshp0", 8),
++	[CLK_MM_NR_CLK + CLK_MDP_WROT0] = MDP_GATE("native_mdp_wrot0", 10),
++	[CLK_MM_NR_CLK + CLK_MDP_RDMA1] = MDP_GATE("native_mdp_rdma1", 15),
++	[CLK_MM_NR_CLK + CLK_MDP_RSZ1] = MDP_GATE("native_mdp_rsz1", 19),
++	[CLK_MM_NR_CLK + CLK_MDP_WROT1] = MDP_GATE("native_mdp_wrot1", 22),
++};
++
++#define to_mt6878_gate(_hw) container_of(_hw, struct mt6878_display_gate, hw)
++
++static int mt6878_gate_power(struct mt6878_gate_block *block, bool cold)
++{
++	u32 val;
++	int ret;
++
++	ret = regmap_read(block->spm, MT6878_DISP_CTL, &val);
++	if (ret)
++		return ret;
++	if (cold)
++		return val & (BIT(2) | BIT(3) | BIT(30) | BIT(31)) ? -EBUSY : 0;
++	return (val & (MT6878_DISP_ON | MT6878_DISP_BLOCKED)) == MT6878_DISP_ON ?
++		0 : -EHOSTDOWN;
++}
++
++static int mt6878_gate_status(struct mt6878_display_gate *gate, u32 *val)
++{
++	struct mt6878_gate_block *block = gate->block;
++	int ret;
++
++	ret = mt6878_gate_power(block, false);
++	if (ret)
++		return ret;
++	return regmap_read(gate->desc->mdp ? block->mdp : block->mm,
++			   gate->desc->status, val);
++}
++
++/* Called only in process context under CCF's prepare lock. */
++static int mt6878_gate_switch(struct mt6878_display_gate *gate, bool on, bool *issued)
++{
++	struct mt6878_gate_block *block = gate->block;
++	u32 val;
++	int ret, poll;
++
++	*issued = false;
++	ret = mt6878_gate_power(block, false);
++	if (ret)
++		return ret;
++	*issued = true;
++	ret = regmap_write(gate->desc->mdp ? block->mdp : block->mm,
++			   gate->desc->status + (on ? 8 : 4), gate->desc->mask);
++	if (ret)
++		return ret;
++	poll = read_poll_timeout(mt6878_gate_status, ret,
++				 ret || (!!(val & gate->desc->mask) != on),
++				 10, 1000, false, gate, &val);
++	return ret ? ret : poll;
++}
++
++static void mt6878_gate_put_parent(struct mt6878_display_gate *gate)
++{
++	clk_disable_unprepare(gate->block->parent);
++	clk_rate_exclusive_put(gate->block->parent);
++	WRITE_ONCE(gate->held, false);
++	atomic_dec(&gate->block->held_count);
++}
++
++static int mt6878_gate_prepare(struct clk_hw *hw)
++{
++	struct mt6878_display_gate *gate = to_mt6878_gate(hw);
++	struct clk *parent = gate->block->parent;
++	bool issued, undone;
++	int ret, rollback;
++
++	if (READ_ONCE(gate->block->faulted))
++		return -EIO;
++	if (gate->held)
++		return 0;
++	ret = clk_rate_exclusive_get(parent);
++	if (ret)
++		return ret;
++	ret = clk_prepare_enable(parent);
++	if (ret) {
++		clk_rate_exclusive_put(parent);
++		return ret;
++	}
++	WRITE_ONCE(gate->held, true);
++	atomic_inc(&gate->block->held_count);
++	if (READ_ONCE(gate->boot_retained)) {
++		u32 val;
++
++		ret = mt6878_gate_status(gate, &val);
++		if (!ret && (val & gate->desc->mask))
++			ret = -EHOSTDOWN;
++		if (ret) {
++			gate->faulted = true;
++			WRITE_ONCE(gate->block->faulted, true);
++		}
++		/* The inherited gate and acquired parent stay pinned on failure. */
++		return ret;
++	}
++	ret = mt6878_gate_switch(gate, true, &issued);
++	if (!ret)
++		return 0;
++	if (issued) {
++		rollback = mt6878_gate_switch(gate, false, &undone);
++		if (rollback) {
++			gate->faulted = true;
++			WRITE_ONCE(gate->block->faulted, true);
++			dev_err(gate->block->dev, "%s failed (%d), rollback failed (%d); parent pinned\n",
++				gate->desc->name, ret, rollback);
++			return ret;
++		}
++	}
++	mt6878_gate_put_parent(gate);
++	return ret;
++}
++
++static void mt6878_gate_unprepare(struct clk_hw *hw)
++{
++	struct mt6878_display_gate *gate = to_mt6878_gate(hw);
++	bool issued, undone;
++	int ret, rollback = 0;
++
++	if (!gate->held || gate->faulted)
++		return;
++	/*
++	 * Stage 82: a boot-retained gate stays open in hardware (LK's state),
++	 * but its Linux hold is released so the block can become idle. It is
++	 * closed only by the DISP power cut (mt6878_display_gates_power_lost).
++	 */
++	if (READ_ONCE(gate->boot_retained)) {
++		mt6878_gate_put_parent(gate);
++		return;
++	}
++	ret = mt6878_gate_switch(gate, false, &issued);
++	if (ret) {
++		if (issued)
++			rollback = mt6878_gate_switch(gate, true, &undone);
++		gate->faulted = true;
++		WRITE_ONCE(gate->block->faulted, true);
++		dev_err(gate->block->dev, "%s release failed (%d), restore %d; parent pinned\n",
++			gate->desc->name, ret, rollback);
++		return;
++	}
++	mt6878_gate_put_parent(gate);
++}
++
++/* Registration, unused-clock queries and atomic paths never access gate banks. */
++static int mt6878_gate_is_prepared(struct clk_hw *hw)
++{
++	return READ_ONCE(to_mt6878_gate(hw)->held);
++}
++
++static const struct clk_ops mt6878_gate_ops = {
++	.prepare = mt6878_gate_prepare,
++	.unprepare = mt6878_gate_unprepare,
++	.is_prepared = mt6878_gate_is_prepared,
++};
++
++/*
++ * Staged adoption primitive. Call before publishing consumers, while a
++ * separate Linux prepare reference permanently pins the DISP vote parent.
++ * Retention is monotonic and deliberately has no release operation.
++ */
++int mt6878_display_gate_retain_boot(struct clk *clk)
++{
++	struct clk_hw *hw = __clk_get_hw(clk);
++	struct mt6878_display_gate *gate;
++	struct mt6878_gate_block *block;
++	unsigned int i;
++	u32 val;
++	int ret = -EINVAL;
++
++	if (!hw)
++		return -EINVAL;
++	mutex_lock(&mt6878_gate_blocks_lock);
++	list_for_each_entry(block, &mt6878_gate_blocks, entry) {
++		for (i = 0; i < block->clocks->num; i++) {
++			if (block->clocks->hws[i] != hw)
++				continue;
++			gate = to_mt6878_gate(hw);
++			if (block->faulted || gate->faulted) {
++				ret = -EIO;
++				goto out;
++			}
++			if (gate->held) {
++				ret = -EBUSY;
++				goto out;
++			}
++			ret = mt6878_gate_status(gate, &val);
++			if (!ret && (val & gate->desc->mask))
++				ret = -EHOSTDOWN;
++			if (!ret)
++				WRITE_ONCE(gate->boot_retained, true);
++			goto out;
++		}
++	}
++out:
++	mutex_unlock(&mt6878_gate_blocks_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_display_gate_retain_boot);
++
++/* Cached process-context query: never takes the CCF lock or accesses MMIO. */
++int mt6878_display_gates_check(struct clk *clk, unsigned int smi, bool idle)
++{
++	struct mt6878_gate_block *block;
++	struct clk_hw *hw = __clk_get_hw(clk);
++	unsigned int i;
++	int ret = -EPROBE_DEFER;
++
++	if (!hw || smi > 1)
++		return -EINVAL;
++	mutex_lock(&mt6878_gate_blocks_lock);
++	if (!list_empty(&mt6878_gate_blocks))
++		ret = -EINVAL;
++	list_for_each_entry(block, &mt6878_gate_blocks, entry) {
++		for (i = 0; i < block->clocks->num; i++) {
++			if (block->clocks->hws[i] != hw)
++				continue;
++			if (i != (smi ? CLK_MM_NR_CLK + CLK_MDP_SMI0 : CLK_MM_SMI_COMMON)) {
++				ret = -EINVAL;
++				goto out;
++			}
++			ret = READ_ONCE(block->faulted) ? -EIO : 0;
++			if (!ret && idle && atomic_read(&block->held_count))
++				ret = -EBUSY;
++			goto out;
++		}
++	}
++out:
++	mutex_unlock(&mt6878_gate_blocks_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_display_gates_check);
++
++/* Caller holds mt6878_gate_blocks_lock. */
++static struct mt6878_gate_block *mt6878_gate_find_block(struct clk_hw *hw)
++{
++	struct mt6878_gate_block *block;
++	unsigned int i;
++
++	list_for_each_entry(block, &mt6878_gate_blocks, entry)
++		for (i = 0; i < block->clocks->num; i++)
++			if (block->clocks->hws[i] == hw)
++				return block;
++	return NULL;
++}
++
++int mt6878_display_gates_held(struct clk *clk, bool log)
++{
++	struct clk_hw *hw = __clk_get_hw(clk);
++	struct mt6878_gate_block *block;
++	unsigned int i;
++	int ret = -EINVAL;
++
++	if (!hw)
++		return -EINVAL;
++	mutex_lock(&mt6878_gate_blocks_lock);
++	block = mt6878_gate_find_block(hw);
++	if (block) {
++		ret = atomic_read(&block->held_count);
++		for (i = 0; log && i < block->clocks->num; i++) {
++			struct mt6878_display_gate *gate = to_mt6878_gate(block->clocks->hws[i]);
++
++			if (READ_ONCE(gate->held))
++				dev_info(block->dev, "held: %s%s\n", gate->desc->name,
++					 READ_ONCE(gate->boot_retained) ? " (boot)" : "");
++		}
++	}
++	mutex_unlock(&mt6878_gate_blocks_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_display_gates_held);
++
++/*
++ * Stage 82: DISP is about to lose power, so every gate returns to its reset
++ * state and LK's retained configuration no longer exists. Later prepares use
++ * the ordinary switch path. The block must be idle.
++ */
++int mt6878_display_gates_power_lost(struct clk *clk)
++{
++	struct clk_hw *hw = __clk_get_hw(clk);
++	struct mt6878_gate_block *block;
++	unsigned int i;
++	int ret = -EINVAL;
++
++	if (!hw)
++		return -EINVAL;
++	mutex_lock(&mt6878_gate_blocks_lock);
++	block = mt6878_gate_find_block(hw);
++	if (block) {
++		ret = 0;
++		if (READ_ONCE(block->faulted))
++			ret = -EIO;
++		else if (atomic_read(&block->held_count))
++			ret = -EBUSY;
++		for (i = 0; !ret && i < block->clocks->num; i++)
++			WRITE_ONCE(to_mt6878_gate(block->clocks->hws[i])->boot_retained, false);
++	}
++	mutex_unlock(&mt6878_gate_blocks_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_display_gates_power_lost);
++
++static void mt6878_gate_unregister_block(void *data)
++{
++	struct mt6878_gate_block *block = data;
++
++	mutex_lock(&mt6878_gate_blocks_lock);
++	list_del(&block->entry);
++	mutex_unlock(&mt6878_gate_blocks_lock);
++}
++
++static struct clk_hw *mt6878_gate_get(struct of_phandle_args *args, void *data)
++{
++	struct clk_hw_onecell_data *clocks = data;
++	u32 id, bank;
++
++	if (args->args_count != 2)
++		return ERR_PTR(-EINVAL);
++	bank = args->args[0];
++	id = args->args[1];
++	if (bank == MT6878_DISPLAY_GATE_MM && id < CLK_MM_NR_CLK)
++		return clocks->hws[id];
++	if (bank == MT6878_DISPLAY_GATE_MDP && id < CLK_MDP_NR_CLK)
++		return clocks->hws[CLK_MM_NR_CLK + id];
++	return ERR_PTR(-EINVAL);
++}
++
++static int mt6878_gate_legacy_check(void)
++{
++	static const char * const compatibles[] = {
++		"mediatek,mt6878-mmsys0", "mediatek,mt6878-mdpsys",
++	};
++	struct device_node *node;
++	unsigned int i;
++
++	for (i = 0; i < ARRAY_SIZE(compatibles); i++)
++		for_each_compatible_node(node, NULL, compatibles[i])
++			if (of_device_is_available(node)) {
++				of_node_put(node);
++				return -EBUSY;
++			}
++	return 0;
++}
++
++static int mt6878_gate_parent_check(struct device_node *np)
++{
++	struct of_phandle_args args;
++	int ret;
++
++	if (of_clk_get_parent_count(np) != 1 ||
++	    of_property_count_strings(np, "clock-names") != 1 ||
++	    of_property_match_string(np, "clock-names", "disp") != 0)
++		return -EINVAL;
++	ret = of_parse_phandle_with_args(np, "clocks", "#clock-cells", 0, &args);
++	if (ret)
++		return ret;
++	ret = of_device_is_compatible(args.np, "mediatek,mt6878-display-clock-voter") &&
++		args.args_count == 1 && args.args[0] == CLK_MT6878_DISP_VOTE ? 0 : -EINVAL;
++	if (!ret && of_property_read_bool(np, "mediatek,retain-boot-clocks") &&
++	    !of_property_read_bool(args.np, "mediatek,retain-boot-clocks"))
++		ret = -EINVAL;
++	of_node_put(args.np);
++	return ret;
++}
++
++/* A generic debugfs register dump must not read a powered-off gate bank. */
++static bool mt6878_gate_precious(struct device *dev, unsigned int reg)
++{
++	return true;
++}
++
++static const struct regmap_config mt6878_mm_gate_config = {
++	.reg_bits = 32, .val_bits = 32, .reg_stride = 4, .max_register = 0x118,
++	.precious_reg = mt6878_gate_precious,
++};
++
++static const struct regmap_config mt6878_mdp_gate_config = {
++	.reg_bits = 32, .val_bits = 32, .reg_stride = 4, .max_register = 0x108,
++	.precious_reg = mt6878_gate_precious,
++};
++
++static int mt6878_display_gates_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct mt6878_gate_block *block;
++	struct clk_hw_onecell_data *data;
++	struct device_node *mm_node, *spm_node;
++	struct resource *mdp_resource;
++	struct resource resource;
++	void __iomem *base;
++	unsigned int i;
++	bool retain_boot = of_property_read_bool(dev->of_node, "mediatek,retain-boot-clocks");
++	int ret;
++
++	ret = mt6878_gate_legacy_check();
++	if (ret)
++		return dev_err_probe(dev, ret, "legacy display gate providers must be disabled\n");
++	ret = mt6878_gate_parent_check(dev->of_node);
++	if (ret)
++		return ret;
++	block = devm_kzalloc(dev, sizeof(*block), GFP_KERNEL);
++	if (!block)
++		return -ENOMEM;
++	block->dev = dev;
++	spm_node = of_parse_phandle(dev->of_node, "mediatek,spm", 0);
++	if (!spm_node)
++		return -EINVAL;
++	ret = of_address_to_resource(spm_node, 0, &resource);
++	if (ret || resource.start != 0x1c001000 || resource_size(&resource) < 0xe74) {
++		of_node_put(spm_node);
++		return ret ? ret : -EINVAL;
++	}
++	block->spm = syscon_node_to_regmap(spm_node);
++	of_node_put(spm_node);
++	if (IS_ERR(block->spm))
++		return PTR_ERR(block->spm);
++	ret = mt6878_gate_power(block, !retain_boot);
++	if (ret)
++		return dev_err_probe(dev, ret, "invalid DISP state for gate registration\n");
++
++	mm_node = of_parse_phandle(dev->of_node, "mediatek,mmsys", 0);
++	if (!mm_node)
++		return -EINVAL;
++	if (!of_device_is_available(mm_node) ||
++	    !of_device_is_compatible(mm_node, "mediatek,mt6878-mmsys0-native")) {
++		of_node_put(mm_node);
++		return -EINVAL;
++	}
++	ret = of_address_to_resource(mm_node, 0, &resource);
++	of_node_put(mm_node);
++	if (ret)
++		return ret;
++	if (resource.start != 0x14000000 || resource_size(&resource) < 0x11c)
++		return -EINVAL;
++	/* Share the configuration bank with the powered MMSYS route controller. */
++	base = devm_ioremap(dev, resource.start, resource_size(&resource));
++	if (!base)
++		return -ENOMEM;
++	block->mm = devm_regmap_init_mmio(dev, base, &mt6878_mm_gate_config);
++	if (IS_ERR(block->mm))
++		return PTR_ERR(block->mm);
++	mdp_resource = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!mdp_resource || mdp_resource->start != 0x1f000000 ||
++	    resource_size(mdp_resource) < 0x10c)
++		return -EINVAL;
++	base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(base))
++		return PTR_ERR(base);
++	block->mdp = devm_regmap_init_mmio(dev, base, &mt6878_mdp_gate_config);
++	if (IS_ERR(block->mdp))
++		return PTR_ERR(block->mdp);
++	block->parent = devm_clk_get(dev, "disp");
++	if (IS_ERR(block->parent))
++		return dev_err_probe(dev, PTR_ERR(block->parent), "missing DISP vote clock\n");
++
++	data = devm_kzalloc(dev, struct_size(data, hws, MT6878_GATE_COUNT), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	data->num = MT6878_GATE_COUNT;
++	atomic_set(&block->held_count, 0);
++	if (retain_boot) {
++		mutex_lock(&mt6878_gate_blocks_lock);
++		if (mt6878_boot_gates_attempted) {
++			mutex_unlock(&mt6878_gate_blocks_lock);
++			return -EBUSY;
++		}
++		mt6878_boot_gates_attempted = true;
++		mutex_unlock(&mt6878_gate_blocks_lock);
++	}
++	for (i = 0; i < data->num; i++) {
++		struct clk_parent_data parent = { .fw_name = "disp" };
++		struct clk_init_data init = {
++			.name = mt6878_gates[i].name, .ops = &mt6878_gate_ops,
++			.parent_data = &parent, .num_parents = 1,
++		};
++		struct mt6878_display_gate *gate;
++
++		gate = devm_kzalloc(dev, sizeof(*gate), GFP_KERNEL);
++		if (!gate)
++			return -ENOMEM;
++		gate->block = block;
++		gate->desc = &mt6878_gates[i];
++		if (retain_boot) {
++			u32 status;
++
++			ret = mt6878_gate_status(gate, &status);
++			if (ret)
++				return ret;
++			/*
++			 * Stage 82: no CLK_IS_CRITICAL. Unused retained gates are
++			 * never prepared, so disable_unused skips them (is_prepared
++			 * is false) and they stay open as LK left them.
++			 */
++			gate->boot_retained = !(status & gate->desc->mask);
++		}
++		gate->hw.init = &init;
++		ret = devm_clk_hw_register(dev, &gate->hw);
++		if (ret)
++			return ret;
++		data->hws[i] = &gate->hw;
++	}
++	block->clocks = data;
++	mutex_lock(&mt6878_gate_blocks_lock);
++	/* Physical bank addresses are fixed: only one owner may register. */
++	if (!list_empty(&mt6878_gate_blocks)) {
++		mutex_unlock(&mt6878_gate_blocks_lock);
++		return -EBUSY;
++	}
++	list_add_tail(&block->entry, &mt6878_gate_blocks);
++	mutex_unlock(&mt6878_gate_blocks_lock);
++	ret = devm_add_action_or_reset(dev, mt6878_gate_unregister_block, block);
++	if (ret)
++		return ret;
++	return devm_of_clk_add_hw_provider(dev, mt6878_gate_get, data);
++}
++
++static const struct of_device_id mt6878_display_gates_of_match[] = {
++	{ .compatible = "mediatek,mt6878-display-gates" },
++	{ /* sentinel */ }
++};
++
++/* Fixed built-in provider; retained fault references require reboot. */
++static struct platform_driver mt6878_display_gates_driver = {
++	.probe = mt6878_display_gates_probe,
++	.driver = {
++		.name = "mt6878-display-gates",
++		.of_match_table = mt6878_display_gates_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(mt6878_display_gates_driver);
+diff --git a/drivers/clk/mediatek/clk-mt6878-display-voter.c b/drivers/clk/mediatek/clk-mt6878-display-voter.c
+new file mode 100644
+index 000000000..84070b38b
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6878-display-voter.c
+@@ -0,0 +1,537 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6878 display clock votes, based on MediaTek's downstream MUX_HWV protocol. */
++
++#include <dt-bindings/clock/mediatek,mt6878-clock.h>
++#include <dt-bindings/clock/mediatek,mt6878-display-voter.h>
++#include <linux/clk.h>
++#include <linux/clk-provider.h>
++#include <linux/err.h>
++#include <linux/init.h>
++#include <linux/mfd/syscon.h>
++#include <linux/mutex.h>
++#include <linux/soc/mediatek/mt6878-display-voter.h>
++#include <linux/of.h>
++#include <linux/of_clk.h>
++#include <linux/platform_device.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++
++#define MT6878_VOTE_SET		0x10
++#define MT6878_VOTE_CLR		0x14
++#define MT6878_VOTE_DONE		0x1c08
++#define MT6878_TOP_CFG1		0x20
++#define MT6878_VOTE_ACK_US	100000
++#define MT6878_VOTE_DONE_US	5000000
++
++struct mt6878_display_vote {
++	struct clk_hw hw;
++	struct clk *parent;
++	struct device *dev;
++	struct regmap *voter;
++	struct regmap *top;
++	u32 mask;
++	bool held;
++	bool faulted;
++	bool boot_retained;
++};
++
++struct mt6878_vote_desc {
++	const char *name;
++	const char *input;
++	u32 parent_id;
++	u32 mask;
++};
++
++static const struct mt6878_vote_desc mt6878_vote_descs[] = {
++	[CLK_MT6878_DISP_VOTE] = {
++		.name = "mt6878_disp0_vote", .input = "disp",
++		.parent_id = CLK_TOP_DISP0_SEL, .mask = BIT(7),
++	},
++	[CLK_MT6878_MMINFRA_VOTE] = {
++		.name = "mt6878_mminfra_vote", .input = "mminfra",
++		.parent_id = CLK_TOP_MMINFRA_SEL, .mask = BIT(15),
++	},
++};
++
++static bool mt6878_boot_voter_attempted;
++static DEFINE_MUTEX(mt6878_boot_votes_lock);
++static struct mt6878_display_vote *mt6878_boot_votes[CLK_MT6878_DISPLAY_VOTE_NR];
++
++#define to_mt6878_vote(_hw) container_of(_hw, struct mt6878_display_vote, hw)
++
++static int mt6878_vote_idle(struct regmap *voter, u32 mask)
++{
++	u32 val;
++	int ret;
++
++	ret = regmap_read(voter, MT6878_VOTE_SET, &val);
++	if (ret)
++		return ret;
++	if (val & mask)
++		return -EBUSY;
++	ret = regmap_read(voter, MT6878_VOTE_DONE, &val);
++	if (ret)
++		return ret;
++	return (val & mask) == mask ? 0 : -EBUSY;
++}
++
++static int mt6878_vote_wait_ack(struct mt6878_display_vote *vote, bool on)
++{
++	u32 val;
++	int ret;
++
++	ret = regmap_read_poll_timeout(vote->voter, MT6878_VOTE_SET, val,
++				       !!(val & vote->mask) == on, 10, MT6878_VOTE_ACK_US);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(vote->voter, MT6878_VOTE_DONE, val,
++				       val & vote->mask, 10, MT6878_VOTE_DONE_US);
++	if (ret || !on)
++		return ret;
++
++	/* Other voters may retain the physical clock after our vote is removed. */
++	return regmap_read_poll_timeout(vote->top, MT6878_TOP_CFG1, val,
++				       !(val & vote->mask), 10, MT6878_VOTE_DONE_US);
++}
++
++/* Process-context CCF prepare lock serializes state and both vote callbacks. */
++static int mt6878_vote_switch(struct mt6878_display_vote *vote, bool on, bool *issued)
++{
++	u32 val;
++	int ret;
++
++	*issued = false;
++	ret = regmap_read_poll_timeout(vote->voter, MT6878_VOTE_DONE, val,
++				       val & vote->mask, 10, MT6878_VOTE_DONE_US);
++	if (ret)
++		return ret;
++
++	/* A transport error does not prove that the write was rejected. */
++	*issued = true;
++	ret = regmap_write(vote->voter, on ? MT6878_VOTE_SET : MT6878_VOTE_CLR, vote->mask);
++	if (ret)
++		return ret;
++
++	return mt6878_vote_wait_ack(vote, on);
++}
++
++static int mt6878_vote_boot_sample(struct mt6878_display_vote *vote, bool *acked)
++{
++	u32 done, set, top;
++	int ret;
++
++	ret = regmap_read(vote->voter, MT6878_VOTE_DONE, &done);
++	if (ret)
++		return ret;
++	ret = regmap_read(vote->voter, MT6878_VOTE_SET, &set);
++	if (ret)
++		return ret;
++	ret = regmap_read(vote->top, MT6878_TOP_CFG1, &top);
++	if (ret)
++		return ret;
++
++	if (!(done & vote->mask) || (top & vote->mask))
++		return -EHOSTDOWN;
++	*acked = set & vote->mask;
++	return 0;
++}
++
++static int mt6878_vote_boot_status(struct mt6878_display_vote *vote)
++{
++	bool acked;
++	int ret;
++
++	ret = mt6878_vote_boot_sample(vote, &acked);
++	if (ret)
++		return ret;
++	return acked ? 0 : -EHOSTDOWN;
++}
++
++static int mt6878_vote_acquire_boot(struct mt6878_display_vote *vote)
++{
++	bool acked;
++	int ret;
++
++	ret = mt6878_vote_boot_sample(vote, &acked);
++	if (ret || acked)
++		return ret;
++
++	/*
++	 * The clock is already physically on. Acquire the AP vote without
++	 * a compensating CLR, even if the status of a SET write is uncertain.
++	 */
++	ret = regmap_write(vote->voter, MT6878_VOTE_SET, vote->mask);
++	if (ret)
++		return ret;
++
++	return mt6878_vote_wait_ack(vote, true);
++}
++
++/*
++ * Call during serialized boot adoption, with an independent permanent
++ * prepare reference to the topckgen parent. This marks an existing vote;
++ * it does not create or remove a hardware vote.
++ */
++int mt6878_display_vote_retain_boot(struct clk *clk)
++{
++	struct clk_hw *hw = __clk_get_hw(clk);
++	struct mt6878_display_vote *vote;
++	unsigned int i;
++	int ret = -EINVAL;
++
++	if (!hw)
++		return ret;
++	mutex_lock(&mt6878_boot_votes_lock);
++	for (i = 0; i < CLK_MT6878_DISPLAY_VOTE_NR; i++) {
++		vote = mt6878_boot_votes[i];
++		if (!vote || &vote->hw != hw)
++			continue;
++		if (vote->faulted) {
++			ret = -EIO;
++		} else if (vote->held) {
++			ret = -EBUSY;
++		} else {
++			ret = mt6878_vote_boot_status(vote);
++			if (!ret)
++				WRITE_ONCE(vote->boot_retained, true);
++		}
++		break;
++	}
++	mutex_unlock(&mt6878_boot_votes_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_display_vote_retain_boot);
++
++int mt6878_display_vote_check_boot(struct clk *clk, unsigned int index)
++{
++	struct clk_hw *hw = __clk_get_hw(clk);
++	struct mt6878_display_vote *vote;
++	int ret = -EHOSTDOWN;
++
++	if (!hw || index >= CLK_MT6878_DISPLAY_VOTE_NR)
++		return -EINVAL;
++	mutex_lock(&mt6878_boot_votes_lock);
++	vote = mt6878_boot_votes[index];
++	if (vote && &vote->hw == hw) {
++		if (READ_ONCE(vote->faulted))
++			ret = -EIO;
++		else if (READ_ONCE(vote->boot_retained) && READ_ONCE(vote->held))
++			ret = 0;
++	}
++	mutex_unlock(&mt6878_boot_votes_lock);
++	return ret;
++}
++EXPORT_SYMBOL_GPL(mt6878_display_vote_check_boot);
++
++static void mt6878_vote_put_parent(struct mt6878_display_vote *vote)
++{
++	clk_disable_unprepare(vote->parent);
++	clk_rate_exclusive_put(vote->parent);
++	WRITE_ONCE(vote->held, false);
++}
++
++static int mt6878_vote_prepare(struct clk_hw *hw)
++{
++	struct mt6878_display_vote *vote = to_mt6878_vote(hw);
++	bool issued, undone;
++	int ret, rollback;
++
++	if (vote->faulted)
++		return -EIO;
++	if (vote->held)
++		return 0;
++
++	ret = clk_rate_exclusive_get(vote->parent);
++	if (ret)
++		return ret;
++	ret = clk_prepare_enable(vote->parent);
++	if (ret) {
++		clk_rate_exclusive_put(vote->parent);
++		return ret;
++	}
++	WRITE_ONCE(vote->held, true);
++
++	if (READ_ONCE(vote->boot_retained)) {
++		ret = mt6878_vote_boot_status(vote);
++		if (ret) {
++			vote->faulted = true;
++			dev_err(vote->dev, "Inherited vote changed (%d); parent retained\n", ret);
++		}
++		return ret;
++	}
++	ret = mt6878_vote_switch(vote, true, &issued);
++	if (!ret)
++		return 0;
++	if (issued) {
++		rollback = mt6878_vote_switch(vote, false, &undone);
++		if (rollback) {
++			vote->faulted = true;
++			dev_err(vote->dev, "clock vote failed (%d), rollback failed (%d); parent pinned until reboot\n",
++				ret, rollback);
++			return ret;
++		}
++	}
++	mt6878_vote_put_parent(vote);
++	return ret;
++}
++
++static void mt6878_vote_unprepare(struct clk_hw *hw)
++{
++	struct mt6878_display_vote *vote = to_mt6878_vote(hw);
++	bool issued, undone;
++	int ret, rollback = 0;
++
++	if (!vote->held || vote->faulted || READ_ONCE(vote->boot_retained))
++		return;
++	ret = mt6878_vote_switch(vote, false, &issued);
++	if (ret) {
++		if (issued)
++			rollback = mt6878_vote_switch(vote, true, &undone);
++		vote->faulted = true;
++		dev_err(vote->dev, "clock unvote failed (%d), restore result %d; parent pinned until reboot\n",
++			ret, rollback);
++		return;
++	}
++	mt6878_vote_put_parent(vote);
++}
++
++/* No bank access from registration queries or atomic CCF enable/disable paths. */
++static int mt6878_vote_is_prepared(struct clk_hw *hw)
++{
++	return READ_ONCE(to_mt6878_vote(hw)->held);
++}
++
++static const struct clk_ops mt6878_vote_ops = {
++	.prepare = mt6878_vote_prepare,
++	.unprepare = mt6878_vote_unprepare,
++	.is_prepared = mt6878_vote_is_prepared,
++};
++
++static int mt6878_vote_check_parent(struct device_node *np, struct device_node *top,
++				    unsigned int index)
++{
++	struct of_phandle_args args;
++	int ret;
++
++	ret = of_parse_phandle_with_args(np, "clocks", "#clock-cells", index, &args);
++	if (ret)
++		return ret;
++	ret = args.np == top && args.args_count == 1 &&
++		args.args[0] == mt6878_vote_descs[index].parent_id ? 0 : -EINVAL;
++	of_node_put(args.np);
++	return ret;
++}
++
++static void mt6878_vote_unregister_boot_registry(void *arg)
++{
++	struct clk_hw_onecell_data *data = arg;
++	unsigned int i;
++
++	mutex_lock(&mt6878_boot_votes_lock);
++	for (i = 0; i < data->num; i++)
++		if (mt6878_boot_votes[i] && &mt6878_boot_votes[i]->hw == data->hws[i])
++			mt6878_boot_votes[i] = NULL;
++	mutex_unlock(&mt6878_boot_votes_lock);
++}
++
++static int mt6878_display_voter_probe(struct platform_device *pdev)
++{
++	struct clk_bulk_data boot_parents[CLK_MT6878_DISPLAY_VOTE_NR] = {};
++	struct device *dev = &pdev->dev;
++	struct clk_hw_onecell_data *data;
++	struct device_node *top_node;
++	struct regmap *voter, *top;
++	unsigned int i;
++	bool retain_boot = of_property_read_bool(dev->of_node, "mediatek,retain-boot-clocks");
++	bool acquire_boot;
++	int ret;
++
++	acquire_boot = of_property_read_bool(dev->of_node, "mediatek,acquire-boot-clock-votes");
++	if (acquire_boot && !retain_boot)
++		return -EINVAL;
++
++	if (of_clk_get_parent_count(dev->of_node) != CLK_MT6878_DISPLAY_VOTE_NR ||
++	    of_property_count_strings(dev->of_node, "clock-names") != CLK_MT6878_DISPLAY_VOTE_NR)
++		return -EINVAL;
++
++	top_node = of_parse_phandle(dev->of_node, "mediatek,topckgen", 0);
++	if (!top_node)
++		return -EINVAL;
++	if (!of_device_is_compatible(top_node, "mediatek,mt6878-topckgen")) {
++		of_node_put(top_node);
++		return -EINVAL;
++	}
++	for (i = 0; i < CLK_MT6878_DISPLAY_VOTE_NR; i++) {
++		ret = mt6878_vote_check_parent(dev->of_node, top_node, i);
++		if (ret) {
++			of_node_put(top_node);
++			return ret;
++		}
++	}
++	top = syscon_node_to_regmap(top_node);
++	of_node_put(top_node);
++	if (IS_ERR(top))
++		return PTR_ERR(top);
++	voter = syscon_regmap_lookup_by_phandle(dev->of_node, "mediatek,hardware-voter");
++	if (IS_ERR(voter))
++		return PTR_ERR(voter);
++	if (top == voter)
++		return -EINVAL;
++
++	if (!retain_boot) {
++		ret = mt6878_vote_idle(voter, BIT(7) | BIT(15));
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "display clock votes must be idle/unowned\n");
++	} else {
++		for (i = 0; i < CLK_MT6878_DISPLAY_VOTE_NR; i++) {
++			struct mt6878_display_vote probe = {
++				.voter = voter, .top = top, .mask = mt6878_vote_descs[i].mask,
++			};
++
++			bool acked;
++
++			ret = mt6878_vote_boot_sample(&probe, &acked);
++			if (!ret && !acked && !acquire_boot)
++				ret = -EHOSTDOWN;
++			if (ret)
++				return dev_err_probe(dev, ret,
++						     "inherited display vote is unstable\n");
++		}
++	}
++
++	data = devm_kzalloc(dev, struct_size(data, hws, CLK_MT6878_DISPLAY_VOTE_NR), GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	data->num = CLK_MT6878_DISPLAY_VOTE_NR;
++	if (retain_boot) {
++		/* Resolve dependencies before a permanent registration attempt. */
++		for (i = 0; i < data->num; i++) {
++			boot_parents[i].clk = clk_get(dev, mt6878_vote_descs[i].input);
++			if (IS_ERR(boot_parents[i].clk)) {
++				ret = PTR_ERR(boot_parents[i].clk);
++				goto put_boot_parents;
++			}
++		}
++		mutex_lock(&mt6878_boot_votes_lock);
++		if (mt6878_boot_voter_attempted) {
++			mutex_unlock(&mt6878_boot_votes_lock);
++			ret = -EBUSY;
++			goto put_boot_parents;
++		}
++		mt6878_boot_voter_attempted = true;
++		mutex_unlock(&mt6878_boot_votes_lock);
++
++		/* Pin both live parent trees before critical registration can unwind. */
++		ret = clk_bulk_prepare_enable_if_active(data->num, boot_parents);
++		if (ret) {
++			mutex_lock(&mt6878_boot_votes_lock);
++			mt6878_boot_voter_attempted = false;
++			mutex_unlock(&mt6878_boot_votes_lock);
++			/*
++			 * The parent PLL trees are held by consumers that may probe
++			 * later (Stage 61: univpll unheld at 0.07 s); retry then.
++			 */
++			if (ret == -EAGAIN)
++				ret = -EPROBE_DEFER;
++			dev_err_probe(dev, ret, "cannot acquire inherited parent holds safely\n");
++			goto put_boot_parents;
++		}
++		/* Keep the handles and references until reboot, including on error. */
++	}
++	if (acquire_boot) {
++		static const unsigned int order[] = {
++			CLK_MT6878_MMINFRA_VOTE, CLK_MT6878_DISP_VOTE,
++		};
++
++		for (i = 0; i < data->num; i++) {
++			ret = clk_rate_exclusive_get(boot_parents[i].clk);
++			if (ret)
++				return ret;
++		}
++
++		/* Both parent trees are pinned before adding either AP vote. */
++		for (i = 0; i < ARRAY_SIZE(order); i++) {
++			const struct mt6878_vote_desc *desc = &mt6878_vote_descs[order[i]];
++			struct mt6878_display_vote boot = {
++				.voter = voter, .top = top, .mask = desc->mask,
++			};
++
++			ret = mt6878_vote_acquire_boot(&boot);
++			if (ret)
++				return dev_err_probe(dev, ret, "boot %s vote failed\n",
++						     desc->input);
++		}
++	}
++	for (i = 0; i < data->num; i++) {
++		const struct mt6878_vote_desc *desc = &mt6878_vote_descs[i];
++		struct clk_parent_data parent = { .fw_name = desc->input };
++		struct clk_init_data init = {
++			.name = desc->name, .ops = &mt6878_vote_ops,
++			.parent_data = &parent, .num_parents = 1,
++		};
++		struct mt6878_display_vote *vote;
++
++		if (of_property_match_string(dev->of_node, "clock-names", desc->input) != (int)i)
++			return -EINVAL;
++		vote = devm_kzalloc(dev, sizeof(*vote), GFP_KERNEL);
++		if (!vote)
++			return -ENOMEM;
++		if (retain_boot)
++			vote->parent = boot_parents[i].clk;
++		else
++			vote->parent = devm_clk_get(dev, desc->input);
++		if (IS_ERR(vote->parent))
++			return dev_err_probe(dev, PTR_ERR(vote->parent),
++					     "missing %s parent\n", desc->input);
++		vote->dev = dev;
++		vote->voter = voter;
++		vote->top = top;
++		vote->mask = desc->mask;
++		vote->boot_retained = retain_boot;
++		if (retain_boot)
++			init.flags |= CLK_IS_CRITICAL;
++		vote->hw.init = &init;
++		ret = devm_clk_hw_register(dev, &vote->hw);
++		if (ret)
++			return ret;
++		data->hws[i] = &vote->hw;
++	}
++
++	mutex_lock(&mt6878_boot_votes_lock);
++	for (i = 0; i < data->num; i++) {
++		if (mt6878_boot_votes[i]) {
++			mutex_unlock(&mt6878_boot_votes_lock);
++			return -EBUSY;
++		}
++	}
++	for (i = 0; i < data->num; i++)
++		mt6878_boot_votes[i] = to_mt6878_vote(data->hws[i]);
++	mutex_unlock(&mt6878_boot_votes_lock);
++	ret = devm_add_action_or_reset(dev, mt6878_vote_unregister_boot_registry, data);
++	if (ret)
++		return ret;
++
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, data);
++
++put_boot_parents:
++	while (i)
++		clk_put(boot_parents[--i].clk);
++	return ret;
++}
++
++static const struct of_device_id mt6878_display_voter_of_match[] = {
++	{ .compatible = "mediatek,mt6878-display-clock-voter" },
++	{ /* sentinel */ }
++};
++
++/* Built-in, fixed DT provider: pinned fault references have system lifetime. */
++static struct platform_driver mt6878_display_voter_driver = {
++	.probe = mt6878_display_voter_probe,
++	.driver = {
++		.name = "mt6878-display-clock-voter",
++		.of_match_table = mt6878_display_voter_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(mt6878_display_voter_driver);
+diff --git a/drivers/clk/mediatek/clk-mt6878-gce.c b/drivers/clk/mediatek/clk-mt6878-gce.c
+new file mode 100644
+index 000000000..ce8ae2bd1
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6878-gce.c
+@@ -0,0 +1,352 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* MT6878 display GCE hardware-voted gates. */
++
++#include <dt-bindings/clock/mediatek,mt6878-display-voter.h>
++#include <dt-bindings/clock/mediatek,mt6878-gce-clocks.h>
++#include <dt-bindings/power/mediatek,mt6878-power.h>
++#include <linux/clk.h>
++#include <linux/clk-provider.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/mfd/syscon.h>
++#include <linux/of_address.h>
++#include <linux/of_clk.h>
++#include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
++#include <linux/regmap.h>
++#include <linux/slab.h>
++
++#define GCE_VOTE_POLL_US		10
++#define GCE_VOTE_TIMEOUT_US	100000
++
++struct mt6878_gce_gate_desc {
++	const char *name;
++	u32 set;
++	u32 clear;
++	u32 done;
++	u32 status;
++	u32 mask;
++};
++
++struct mt6878_gce_clocks {
++	struct device *dev;
++	struct regmap *voter;
++	void __iomem *base;
++	struct clk *parent;
++	bool faulted;
++};
++
++struct mt6878_gce_gate {
++	struct clk_hw hw;
++	struct mt6878_gce_clocks *clocks;
++	const struct mt6878_gce_gate_desc *desc;
++	bool held;
++};
++
++static const struct mt6878_gce_gate_desc mt6878_gce_gate_descs[] = {
++	[CLK_MT6878_GCE_D] = {
++		.name = "mt6878_gce_d", .set = 0x0, .clear = 0x4,
++		.done = 0x1c00, .status = 0x100, .mask = BIT(0),
++	},
++	[CLK_MT6878_GCE_TIMER] = {
++		.name = "mt6878_gce_timer", .set = 0x8, .clear = 0xc,
++		.done = 0x1c04, .status = 0x110, .mask = BIT(17),
++	},
++};
++
++#define to_gce_gate(_hw) container_of(_hw, struct mt6878_gce_gate, hw)
++
++static int mt6878_gce_vote(struct mt6878_gce_gate *gate, bool on, bool *issued)
++{
++	const struct mt6878_gce_gate_desc *desc = gate->desc;
++	struct mt6878_gce_clocks *clocks = gate->clocks;
++	u32 val;
++	int ret;
++
++	*issued = false;
++	ret = regmap_read_poll_timeout(clocks->voter, desc->done, val, val & desc->mask,
++				       GCE_VOTE_POLL_US, GCE_VOTE_TIMEOUT_US);
++	if (ret)
++		return ret;
++
++	if (!on) {
++		/* The vendor sequence first clears the voter bus idle indication. */
++		ret = regmap_read(clocks->voter, desc->clear, &val);
++		if (ret)
++			return ret;
++	}
++
++	*issued = true;
++	ret = regmap_write(clocks->voter, on ? desc->set : desc->clear, desc->mask);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(clocks->voter, desc->set, val,
++				       !!(val & desc->mask) == on,
++				       GCE_VOTE_POLL_US, GCE_VOTE_TIMEOUT_US);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(clocks->voter, desc->done, val, val & desc->mask,
++				       GCE_VOTE_POLL_US, GCE_VOTE_TIMEOUT_US);
++	if (ret || !on)
++		return ret;
++
++	return readl_poll_timeout(clocks->base + desc->status, val, !(val & desc->mask),
++				  GCE_VOTE_POLL_US, GCE_VOTE_TIMEOUT_US);
++}
++
++static void mt6878_gce_put(struct mt6878_gce_gate *gate)
++{
++	struct mt6878_gce_clocks *clocks = gate->clocks;
++
++	clk_disable_unprepare(clocks->parent);
++	/* Schedule idle outside the CCF prepare lock. */
++	pm_runtime_put(clocks->dev);
++	WRITE_ONCE(gate->held, false);
++}
++
++static int mt6878_gce_prepare(struct clk_hw *hw)
++{
++	struct mt6878_gce_gate *gate = to_gce_gate(hw);
++	struct mt6878_gce_clocks *clocks = gate->clocks;
++	bool issued, undone;
++	int ret;
++
++	if (clocks->faulted)
++		return -EIO;
++
++	/* A consumer must resume the supplier before taking the CCF lock. */
++	ret = pm_runtime_get_if_in_use(clocks->dev);
++	if (ret <= 0)
++		return ret ? ret : -EHOSTDOWN;
++
++	/* Keep an explicit parent reference if CCF unwinds after a fault. */
++	ret = clk_prepare_enable(clocks->parent);
++	if (ret) {
++		pm_runtime_put(clocks->dev);
++		return ret;
++	}
++	WRITE_ONCE(gate->held, true);
++
++	ret = mt6878_gce_vote(gate, true, &issued);
++	if (!ret)
++		return 0;
++	if (issued && mt6878_gce_vote(gate, false, &undone)) {
++		clocks->faulted = true;
++		dev_err(clocks->dev, "GCE vote rollback failed; retaining power and parent clock\n");
++		return ret;
++	}
++
++	mt6878_gce_put(gate);
++	return ret;
++}
++
++static void mt6878_gce_unprepare(struct clk_hw *hw)
++{
++	struct mt6878_gce_gate *gate = to_gce_gate(hw);
++	struct mt6878_gce_clocks *clocks = gate->clocks;
++	bool issued;
++
++	if (!gate->held || clocks->faulted)
++		return;
++	if (mt6878_gce_vote(gate, false, &issued)) {
++		clocks->faulted = true;
++		dev_err(clocks->dev, "GCE unvote failed; retaining power and parent clock\n");
++		return;
++	}
++
++	mt6878_gce_put(gate);
++}
++
++static int mt6878_gce_is_prepared(struct clk_hw *hw)
++{
++	return READ_ONCE(to_gce_gate(hw)->held);
++}
++
++static const struct clk_ops mt6878_gce_clk_ops = {
++	.prepare = mt6878_gce_prepare,
++	.unprepare = mt6878_gce_unprepare,
++	.is_prepared = mt6878_gce_is_prepared,
++};
++
++static int mt6878_gce_check_supplier(struct device_node *np, const char *property,
++				     const char *cells, const char *compatible, u32 id)
++{
++	struct of_phandle_args args;
++	int ret;
++
++	if (of_count_phandle_with_args(np, property, cells) != 1)
++		return -EINVAL;
++	ret = of_parse_phandle_with_args(np, property, cells, 0, &args);
++	if (ret)
++		return ret;
++	ret = of_device_is_available(args.np) && of_device_is_compatible(args.np, compatible) &&
++		args.args_count == 1 && args.args[0] == id ? 0 : -EINVAL;
++	of_node_put(args.np);
++
++	return ret;
++}
++
++static struct regmap *mt6878_gce_get_voter(struct device_node *np)
++{
++	struct device_node *voter;
++	struct resource res;
++	struct regmap *map;
++	int ret;
++
++	voter = of_parse_phandle(np, "mediatek,hardware-voter", 0);
++	if (!voter)
++		return ERR_PTR(-EINVAL);
++	ret = of_address_to_resource(voter, 0, &res);
++	if (ret || !of_device_is_available(voter) ||
++	    !of_device_is_compatible(voter, "mediatek,mt6878-hwv") ||
++	    res.start != 0x10320000 || resource_size(&res) < 0x2000)
++		map = ERR_PTR(ret ? ret : -EINVAL);
++	else
++		map = syscon_node_to_regmap(voter);
++	of_node_put(voter);
++
++	return map;
++}
++
++static int mt6878_gce_check_idle(struct regmap *voter, const struct mt6878_gce_gate_desc *desc)
++{
++	u32 val;
++	int ret;
++
++	ret = regmap_read(voter, desc->set, &val);
++	if (ret || val & desc->mask)
++		return ret ?: -EBUSY;
++	ret = regmap_read(voter, desc->done, &val);
++	if (ret)
++		return ret;
++
++	return val & desc->mask ? 0 : -EBUSY;
++}
++
++static void mt6878_gce_unregister(void *hw)
++{
++	clk_hw_unregister(hw);
++}
++
++static int mt6878_gce_register_gate(struct mt6878_gce_clocks *clocks,
++				    struct clk_hw_onecell_data *data, unsigned int id)
++{
++	const struct mt6878_gce_gate_desc *desc = &mt6878_gce_gate_descs[id];
++	struct device *dev = clocks->dev;
++	struct clk_parent_data parent = { .fw_name = "mminfra" };
++	struct clk_init_data init = {
++		.name = desc->name,
++		.ops = &mt6878_gce_clk_ops,
++		.parent_data = &parent,
++		.num_parents = 1,
++	};
++	struct mt6878_gce_gate *gate;
++	int ret;
++
++	gate = devm_kzalloc(dev, sizeof(*gate), GFP_KERNEL);
++	if (!gate)
++		return -ENOMEM;
++	gate->desc = desc;
++	gate->clocks = clocks;
++	gate->hw.init = &init;
++
++	/* Keep CCF from automatically resuming this provider under its lock. */
++	ret = of_clk_hw_register(dev->of_node, &gate->hw);
++	if (ret)
++		return ret;
++	ret = devm_add_action_or_reset(dev, mt6878_gce_unregister, &gate->hw);
++	if (ret)
++		return ret;
++	data->hws[id] = &gate->hw;
++
++	return 0;
++}
++
++static int mt6878_gce_clocks_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct device_node *np = dev->of_node;
++	struct mt6878_gce_clocks *clocks;
++	struct clk_hw_onecell_data *data;
++	struct resource *res;
++	unsigned int id;
++	int ret;
++
++	for_each_compatible_node_scoped(node, NULL, "mediatek,mt6878-mminfra_config")
++		if (of_device_is_available(node))
++			return dev_err_probe(dev, -EBUSY,
++					     "legacy MM_INFRA clock provider is enabled\n");
++
++	ret = mt6878_gce_check_supplier(np, "power-domains", "#power-domain-cells",
++					"mediatek,mt6878-display-power-controller",
++					MT6878_POWER_DOMAIN_MM_INFRA);
++	if (ret || !dev->pm_domain)
++		return ret ?: -EINVAL;
++	ret = mt6878_gce_check_supplier(np, "clocks", "#clock-cells",
++					"mediatek,mt6878-display-clock-voter",
++					CLK_MT6878_MMINFRA_VOTE);
++	if (ret)
++		return ret;
++
++	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++	if (!res || res->start != 0x1e800000 || resource_size(res) != 0x1000 ||
++	    platform_get_resource(pdev, IORESOURCE_MEM, 1))
++		return -EINVAL;
++	clocks = devm_kzalloc(dev, sizeof(*clocks), GFP_KERNEL);
++	if (!clocks)
++		return -ENOMEM;
++	clocks->dev = dev;
++	clocks->base = devm_ioremap_resource(dev, res);
++	if (IS_ERR(clocks->base))
++		return PTR_ERR(clocks->base);
++	clocks->voter = mt6878_gce_get_voter(np);
++	if (IS_ERR(clocks->voter))
++		return PTR_ERR(clocks->voter);
++	clocks->parent = devm_clk_get(dev, "mminfra");
++	if (IS_ERR(clocks->parent))
++		return dev_err_probe(dev, PTR_ERR(clocks->parent),
++				     "missing MM_INFRA vote parent\n");
++
++	for (id = 0; id < ARRAY_SIZE(mt6878_gce_gate_descs); id++) {
++		if (!mt6878_gce_gate_descs[id].mask)
++			continue;
++		ret = mt6878_gce_check_idle(clocks->voter, &mt6878_gce_gate_descs[id]);
++		if (ret)
++			return dev_err_probe(dev, ret, "GCE vote must be idle before probe\n");
++	}
++	ret = devm_pm_runtime_enable(dev);
++	if (ret)
++		return ret;
++	data = devm_kzalloc(dev, struct_size(data, hws, ARRAY_SIZE(mt6878_gce_gate_descs)),
++			    GFP_KERNEL);
++	if (!data)
++		return -ENOMEM;
++	data->num = ARRAY_SIZE(mt6878_gce_gate_descs);
++	for (id = 0; id < data->num; id++) {
++		if (!mt6878_gce_gate_descs[id].mask) {
++			data->hws[id] = ERR_PTR(-ENOENT);
++			continue;
++		}
++		ret = mt6878_gce_register_gate(clocks, data, id);
++		if (ret)
++			return ret;
++	}
++
++	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get, data);
++}
++
++static const struct of_device_id mt6878_gce_clocks_of_match[] = {
++	{ .compatible = "mediatek,mt6878-gce-clocks" },
++	{ }
++};
++
++/* Fixed built-in provider; ambiguous clock votes retain resources until reboot. */
++static struct platform_driver mt6878_gce_clocks_driver = {
++	.probe = mt6878_gce_clocks_probe,
++	.driver = {
++		.name = "mt6878-gce-clocks",
++		.of_match_table = mt6878_gce_clocks_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(mt6878_gce_clocks_driver);
+diff --git a/drivers/clk/mediatek/clk-mt6878-mdp.c b/drivers/clk/mediatek/clk-mt6878-mdp.c
+new file mode 100644
+index 000000000..a2f675607
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6878-mdp.c
+@@ -0,0 +1,62 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * MT6878 MDPSYS clocks, adapted from the MediaTek downstream gate table.
++ */
++
++#include <dt-bindings/clock/mediatek,mt6878-clock.h>
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++static const struct mtk_gate_regs mdp_cg_regs = {
++	.set_ofs = 0x104,
++	.clr_ofs = 0x108,
++	.sta_ofs = 0x100,
++};
++
++#define GATE_MDP(_id, _name, _shift) \
++	GATE_MTK(_id, _name, "disp0_ck", &mdp_cg_regs, _shift, \
++		 &mtk_clk_gate_ops_setclr)
++
++static const struct mtk_gate mdp_clks[] = {
++	GATE_MDP(CLK_MDP_MUTEX0, "mdp_mutex0", 0),
++	GATE_MDP(CLK_MDP_APB_BUS, "mdp_apb_bus", 1),
++	GATE_MDP(CLK_MDP_SMI0, "mdp_smi0", 2),
++	GATE_MDP(CLK_MDP_RDMA0, "mdp_rdma0", 3),
++	GATE_MDP(CLK_MDP_HDR0, "mdp_hdr0", 5),
++	GATE_MDP(CLK_MDP_AAL0, "mdp_aal0", 6),
++	GATE_MDP(CLK_MDP_RSZ0, "mdp_rsz0", 7),
++	GATE_MDP(CLK_MDP_TDSHP0, "mdp_tdshp0", 8),
++	GATE_MDP(CLK_MDP_WROT0, "mdp_wrot0", 10),
++	GATE_MDP(CLK_MDP_RDMA1, "mdp_rdma1", 15),
++	GATE_MDP(CLK_MDP_RSZ1, "mdp_rsz1", 19),
++	GATE_MDP(CLK_MDP_WROT1, "mdp_wrot1", 22),
++};
++
++static const struct mtk_clk_desc mdp_desc = {
++	.clks = mdp_clks,
++	.num_clks = ARRAY_SIZE(mdp_clks),
++};
++
++static const struct of_device_id clk_mt6878_mdp_of_match[] = {
++	{ .compatible = "mediatek,mt6878-mdpsys", .data = &mdp_desc },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, clk_mt6878_mdp_of_match);
++
++static struct platform_driver clk_mt6878_mdp_drv = {
++	.probe = mtk_clk_simple_probe,
++	.remove = mtk_clk_simple_remove,
++	.driver = {
++		.name = "clk-mt6878-mdp",
++		.of_match_table = clk_mt6878_mdp_of_match,
++	},
++};
++module_platform_driver(clk_mt6878_mdp_drv);
++
++MODULE_DESCRIPTION("MediaTek MT6878 MDPSYS clock controller driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/clk/mediatek/clk-mt6878-mm.c b/drivers/clk/mediatek/clk-mt6878-mm.c
+new file mode 100644
+index 000000000..eeffac552
+--- /dev/null
++++ b/drivers/clk/mediatek/clk-mt6878-mm.c
+@@ -0,0 +1,129 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Copyright (c) 2023 MediaTek Inc.
++ * MT6878 MMSYS clocks, adapted from the MediaTek downstream gate table.
++ */
++
++#include <dt-bindings/clock/mediatek,mt6878-clock.h>
++#include <linux/clk-provider.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++
++#include "clk-gate.h"
++#include "clk-mtk.h"
++
++static const struct mtk_gate_regs mm0_cg_regs = {
++	.set_ofs = 0x104,
++	.clr_ofs = 0x108,
++	.sta_ofs = 0x100,
++};
++
++static const struct mtk_gate_regs mm1_cg_regs = {
++	.set_ofs = 0x114,
++	.clr_ofs = 0x118,
++	.sta_ofs = 0x110,
++};
++
++#define GATE_MM0(_id, _name, _parent, _shift) \
++	GATE_MTK(_id, _name, _parent, &mm0_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
++#define GATE_MM1(_id, _name, _parent, _shift) \
++	GATE_MTK(_id, _name, _parent, &mm1_cg_regs, _shift, &mtk_clk_gate_ops_setclr)
++
++static const struct mtk_gate mm_clks[] = {
++	/* MM0 */
++	GATE_MM0(CLK_MM_DISP_OVL0_2L, "mm_disp_ovl0_2l",
++			"disp0_ck", 0),
++	GATE_MM0(CLK_MM_DISP_OVL1_2L, "mm_disp_ovl1_2l",
++			"disp0_ck", 1),
++	GATE_MM0(CLK_MM_DISP_OVL2_2L, "mm_disp_ovl2_2l",
++			"disp0_ck", 2),
++	GATE_MM0(CLK_MM_DISP_OVL3_2L, "mm_disp_ovl3_2l",
++			"disp0_ck", 3),
++	GATE_MM0(CLK_MM_DISP_UFBC_WDMA0, "mm_disp_ufbc_wdma0",
++			"disp0_ck", 4),
++	GATE_MM0(CLK_MM_DISP_RSZ1, "mm_disp_rsz1",
++			"disp0_ck", 5),
++	GATE_MM0(CLK_MM_DISP_RSZ0, "mm_disp_rsz0",
++			"disp0_ck", 6),
++	GATE_MM0(CLK_MM_DISP_TDSHP0, "mm_disp_tdshp0",
++			"disp0_ck", 7),
++	GATE_MM0(CLK_MM_DISP_C3D0, "mm_disp_c3d0",
++			"disp0_ck", 8),
++	GATE_MM0(CLK_MM_DISP_COLOR0, "mm_disp_color0",
++			"disp0_ck", 9),
++	GATE_MM0(CLK_MM_DISP_CCORR0, "mm_disp_ccorr0",
++			"disp0_ck", 10),
++	GATE_MM0(CLK_MM_DISP_CCORR1, "mm_disp_ccorr1",
++			"disp0_ck", 11),
++	GATE_MM0(CLK_MM_DISP_AAL0, "mm_disp_aal0",
++			"disp0_ck", 12),
++	GATE_MM0(CLK_MM_DISP_GAMMA0, "mm_disp_gamma0",
++			"disp0_ck", 13),
++	GATE_MM0(CLK_MM_DISP_POSTMASK0, "mm_disp_postmask0",
++			"disp0_ck", 14),
++	GATE_MM0(CLK_MM_DISP_DITHER0, "mm_disp_dither0",
++			"disp0_ck", 15),
++	GATE_MM0(CLK_MM_DISP_TDSHP1, "mm_disp_tdshp1",
++			"disp0_ck", 16),
++	GATE_MM0(CLK_MM_DISP_C3D1, "mm_disp_c3d1",
++			"disp0_ck", 17),
++	GATE_MM0(CLK_MM_DISP_CCORR2, "mm_disp_ccorr2",
++			"disp0_ck", 18),
++	GATE_MM0(CLK_MM_DISP_CCORR3, "mm_disp_ccorr3",
++			"disp0_ck", 19),
++	GATE_MM0(CLK_MM_DISP_GAMMA1, "mm_disp_gamma1",
++			"disp0_ck", 20),
++	GATE_MM0(CLK_MM_DISP_DITHER1, "mm_disp_dither1",
++			"disp0_ck", 21),
++	GATE_MM0(CLK_MM_DISP_SPLITTER0, "mm_disp_splitter0",
++			"disp0_ck", 22),
++	GATE_MM0(CLK_MM_DISP_DSC_WRAP0, "mm_disp_dsc_wrap0",
++			"disp0_ck", 23),
++	GATE_MM0(CLK_MM_DISP_DSI0, "mm_disp_dsi0",
++			"disp0_ck", 24),
++	GATE_MM0(CLK_MM_DISP_DSI1, "mm_disp_dsi1",
++			"disp0_ck", 25),
++	GATE_MM0(CLK_MM_DISP_WDMA1, "mm_disp_wdma1",
++			"disp0_ck", 26),
++	GATE_MM0(CLK_MM_DISP_APB_BUS, "mm_disp_apb_bus",
++			"disp0_ck", 27),
++	GATE_MM0(CLK_MM_DISP_FAKE_ENG0, "mm_disp_fake_eng0",
++			"disp0_ck", 28),
++	GATE_MM0(CLK_MM_DISP_FAKE_ENG1, "mm_disp_fake_eng1",
++			"disp0_ck", 29),
++	GATE_MM0(CLK_MM_DISP_MUTEX0, "mm_disp_mutex0",
++			"disp0_ck", 30),
++	GATE_MM0(CLK_MM_SMI_COMMON, "mm_smi_common",
++			"disp0_ck", 31),
++	/* MM1 */
++	GATE_MM1(CLK_MM_DSI0, "mm_dsi0_ck",
++			"disp0_ck", 0),
++	GATE_MM1(CLK_MM_DSI1, "mm_dsi1_ck",
++			"disp0_ck", 1),
++	GATE_MM1(CLK_MM_26M, "mm_26m_ck",
++			"disp0_ck", 11),
++};
++
++static const struct mtk_clk_desc mm_desc = {
++	.clks = mm_clks,
++	.num_clks = ARRAY_SIZE(mm_clks),
++};
++
++static const struct platform_device_id clk_mt6878_mm_id_table[] = {
++	{ .name = "clk-mt6878-mm", .driver_data = (kernel_ulong_t)&mm_desc },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(platform, clk_mt6878_mm_id_table);
++
++static struct platform_driver clk_mt6878_mm_drv = {
++	.probe = mtk_clk_pdev_probe,
++	.remove = mtk_clk_pdev_remove,
++	.driver = {
++		.name = "clk-mt6878-mm",
++	},
++	.id_table = clk_mt6878_mm_id_table,
++};
++module_platform_driver(clk_mt6878_mm_drv);
++
++MODULE_DESCRIPTION("MediaTek MT6878 MMSYS clock controller driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/clk/mediatek/clk-mt6878-topckgen.c b/drivers/clk/mediatek/clk-mt6878-topckgen.c
+index ee5d7819a..562a65fff 100644
+--- a/drivers/clk/mediatek/clk-mt6878-topckgen.c
++++ b/drivers/clk/mediatek/clk-mt6878-topckgen.c
+@@ -444,9 +444,9 @@ static const struct mtk_fixed_factor top_divs[] = {
+ 	FACTOR(CLK_TOP_BUS, "b",
+ 			"bus_aximem_sel", 1, 1),
+ 	FACTOR(CLK_TOP_DISP0, "disp0_ck",
+-			"disp0_sel", 1, 1),
++			"top_disp0_sel", 1, 1),
+ 	FACTOR(CLK_TOP_MMINFRA, "mminfra_ck",
+-			"mminfra_sel", 1, 1),
++			"top_mminfra_sel", 1, 1),
+ 	FACTOR(CLK_TOP_MMUP, "mmup_ck",
+ 			"mmup_sel", 1, 1),
+ 	FACTOR(CLK_TOP_CAMTG, "camtg_ck",
+diff --git a/include/linux/clk-provider.h b/include/linux/clk-provider.h
+index b01a38fef..23b2008a3 100644
+--- a/include/linux/clk-provider.h
++++ b/include/linux/clk-provider.h
+@@ -34,6 +34,7 @@
+ #define CLK_DUTY_CYCLE_PARENT	BIT(13)
+ 
+ struct clk;
++struct clk_bulk_data;
+ struct clk_hw;
+ struct clk_core;
+ struct dentry;
+@@ -1412,6 +1413,7 @@ struct clk_hw *clk_hw_get_parent_by_index(const struct clk_hw *hw,
+ int clk_hw_get_parent_index(struct clk_hw *hw);
+ int clk_hw_set_parent(struct clk_hw *hw, struct clk_hw *new_parent);
+ unsigned int __clk_get_enable_count(struct clk *clk);
++int clk_bulk_prepare_enable_if_active(int num_clks, const struct clk_bulk_data *clks);
+ unsigned long clk_hw_get_rate(const struct clk_hw *hw);
+ unsigned long clk_hw_get_flags(const struct clk_hw *hw);
+ #define clk_hw_can_set_rate_parent(hw) \
+diff --git a/include/linux/soc/mediatek/mt6878-display-gates.h b/include/linux/soc/mediatek/mt6878-display-gates.h
+new file mode 100644
+index 000000000..235694515
+--- /dev/null
++++ b/include/linux/soc/mediatek/mt6878-display-gates.h
+@@ -0,0 +1,40 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __LINUX_SOC_MEDIATEK_MT6878_DISPLAY_GATES_H
++#define __LINUX_SOC_MEDIATEK_MT6878_DISPLAY_GATES_H
++
++#include <linux/errno.h>
++#include <linux/kconfig.h>
++#include <linux/types.h>
++
++struct clk;
++
++#if IS_REACHABLE(CONFIG_COMMON_CLK_MT6878)
++/* smi: 0 = MM SMI_COMMON, 1 = MDP SMI0. Caller owns DISP or its transition. */
++int mt6878_display_gate_retain_boot(struct clk *clk);
++int mt6878_display_gates_check(struct clk *clk, unsigned int smi, bool idle);
++/* Stage 82: held-gate count (optionally logged) and DISP power-loss notice. */
++int mt6878_display_gates_held(struct clk *clk, bool log);
++int mt6878_display_gates_power_lost(struct clk *clk);
++#else
++static inline int mt6878_display_gate_retain_boot(struct clk *clk)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int mt6878_display_gates_check(struct clk *clk, unsigned int smi, bool idle)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int mt6878_display_gates_held(struct clk *clk, bool log)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int mt6878_display_gates_power_lost(struct clk *clk)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++
++#endif
+diff --git a/include/linux/soc/mediatek/mt6878-display-voter.h b/include/linux/soc/mediatek/mt6878-display-voter.h
+new file mode 100644
+index 000000000..64ff35372
+--- /dev/null
++++ b/include/linux/soc/mediatek/mt6878-display-voter.h
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef __LINUX_SOC_MT6878_DISPLAY_VOTER_H
++#define __LINUX_SOC_MT6878_DISPLAY_VOTER_H
++
++#include <linux/errno.h>
++#include <linux/kconfig.h>
++struct clk;
++
++#if IS_REACHABLE(CONFIG_COMMON_CLK_MT6878)
++int mt6878_display_vote_check_boot(struct clk *clk, unsigned int index);
++int mt6878_display_vote_retain_boot(struct clk *clk);
++#else
++static inline int mt6878_display_vote_check_boot(struct clk *clk, unsigned int index)
++{
++	return -EOPNOTSUPP;
++}
++
++static inline int mt6878_display_vote_retain_boot(struct clk *clk)
++{
++	return -EOPNOTSUPP;
++}
++#endif
++#endif
+-- 
+2.53.0
+

@@ -1,0 +1,81 @@
+--- a/mtk_ccci_fsm.c
++++ b/mtk_ccci_fsm.c
+@@ -385,6 +385,32 @@
+ 			 ccci->sleep.md_sleep[2], ccci->sleep.md_sleep[3]);
+ }
+ 
++/* Keep the stock path for DTs using the standard power domain. */
++extern int cmf_md_runtime_switch(struct device *dev, bool on);
++
++static bool mtk_ccci_cmf_domain(struct device *dev)
++{
++	struct device_node *np __free(device_node) =
++		of_parse_phandle(dev->of_node, "mediatek,modem-power-domain", 0);
++
++	return of_device_is_compatible(np, "cmf,mt6878-switchable-modem-resources");
++}
++
++static int mtk_ccci_runtime_switch(struct device *dev, bool on)
++{
++	typeof(&cmf_md_runtime_switch) transition;
++	int ret;
++
++	if (!mtk_ccci_cmf_domain(dev))
++		return on ? pm_runtime_resume_and_get(dev) : pm_runtime_put_sync(dev);
++	transition = symbol_get(cmf_md_runtime_switch);
++	if (!transition)
++		return -ENODEV;
++	ret = transition(dev, on);
++	symbol_put(cmf_md_runtime_switch);
++	return ret;
++}
++
+ static int mtk_ccci_power_off(struct mtk_ccci *ccci)
+ {
+ 	struct arm_smccc_res res;
+@@ -409,12 +435,18 @@
+ 	 * (ufs_mtk_cali_hold); the mainline UFS driver has no such hook.
+ 	 */
+ 	mtk_ccci_wdt_irq_stop(ccci);
+-	ret = pm_runtime_put_sync(ccci->dev);
++	ret = mtk_ccci_runtime_switch(ccci->dev, false);
+ 	if (ret < 0)
+ 		dev_warn(ccci->dev, "MD power domain off: %d\n", ret);
+ 	ccci->md_domain_held = false;
+ 	/* genpd does not report a failed power off: ask SPM */
+-	if (ret >= 0 && mtk_ccci_md_pwr_ack(ccci) > 0) {
++	if (mtk_ccci_cmf_domain(ccci->dev)) {
++		if (ret < 0)
++			return ret;
++		ret = mtk_ccci_md_pwr_ack(ccci);
++		if (ret)
++			return ret < 0 ? ret : -EIO;
++	} else if (ret >= 0 && mtk_ccci_md_pwr_ack(ccci) > 0) {
+ 		dev_err(ccci->dev, "MD power domain still on\n");
+ 		ret = -EIO;
+ 	}
+@@ -436,13 +468,23 @@
+ 	int ret;
+ 
+ 	mtk_ccci_supplies_set(ccci);
++	if (mtk_ccci_cmf_domain(ccci->dev)) {
++		unsigned int i;
++
++		for (i = 0; i < MTK_CCCI_SUPPLY_NUM; i++) {
++			int uv = regulator_get_voltage(ccci->supply[i]);
++
++			if (uv != mtk_ccci_supply_uv[i])
++				return uv < 0 ? uv : -ERANGE;
++		}
++	}
+ 	ret = mtk_ccci_topckgen_md_clk(ccci, true);
+ 	if (ret)
+ 		return ret;
+ 
+ 	mtk_ccci_sip(ccci, CCCI_SIP_MD_FLIGHT_MODE_SET, 0, 0, &res);
+ 
+-	ret = pm_runtime_resume_and_get(ccci->dev);
++	ret = mtk_ccci_runtime_switch(ccci->dev, true);
+ 	if (ret) {
+ 		dev_err(ccci->dev, "MD power domain on: %d\n", ret);
+ 		return ret;

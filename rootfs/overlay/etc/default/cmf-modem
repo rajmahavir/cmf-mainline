@@ -1,0 +1,12 @@
+# CMF Phone 1 cellular settings, read by cmf-modem-start and cmf-cellular-profile.
+# The defaults below are for Reliance Jio (India), the carrier this port was
+# tested on. Set your carrier's APNs before the first boot.
+CMF_DATA_APN=jionet
+CMF_DATA_APN_LABEL=JioNet
+CMF_IMS_APN=ims
+CMF_IP_TYPE=IPV4V6
+CMF_SIM_SLOT=1
+# NetworkManager profile created by cmf-cellular-profile
+CMF_NM_PROFILE="CMF Cellular"
+# Optional IPv6 DNS for the profile (empty = use the network's)
+CMF_NM_DNS6=""

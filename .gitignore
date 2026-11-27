@@ -1,0 +1,12 @@
+Icon\r
+.DS_Store
+__pycache__/
+*.pyc
+# never commit device data, keys or images
+*.img
+*.pem
+*.key
+area.bin
+area.json
+*.extents
+private/

@@ -1,0 +1,11 @@
+[Unit]
+Description=CMF native boot reached multi-user: clear the initramfs crash-guard marker
+After=multi-user.target
+ConditionPathExists=/var/lib/cmf-native/attempt
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'mv /var/lib/cmf-native/attempt /var/lib/cmf-native/last-ok; sync'
+
+[Install]
+WantedBy=multi-user.target

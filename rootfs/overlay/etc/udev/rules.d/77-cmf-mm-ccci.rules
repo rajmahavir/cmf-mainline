@@ -1,0 +1,14 @@
+# CMF Phone 1: tag the built-in mtk_ccci WWAN ports for the /opt ModemManager
+# Edit ID_MM_MTK_CCCI_DATA_APN below for your carrier (default: Jio "jionet"); see /etc/default/cmf-modem.
+# mtk-ccci plugin (the same properties desktop-voice.sh writes by hand in the
+# chroot session, which has no udev daemon).
+ACTION!="add|change|move|bind", GOTO="cmf_mm_ccci_end"
+SUBSYSTEM!="wwan", GOTO="cmf_mm_ccci_end"
+DEVPATH!="*/d180000.mddriver/wwan/wwan0/*", GOTO="cmf_mm_ccci_end"
+ENV{ID_MM_CANDIDATE}="1", ENV{ID_MM_MTK_CCCI}="1", ENV{ID_MM_PHYSDEV_UID}="mtk-ccci"
+KERNEL=="wwan0at0", ENV{ID_MM_PORT_TYPE_AT_PRIMARY}="1", ENV{ID_MM_MTK_CCCI_IMS}="1", \
+  ENV{ID_MM_MTK_CCCI_SPEECHD_SOCKET}="/run/t2-speechd.sock", ENV{ID_MM_MTK_CCCI_RADIO_MASK}="1", \
+  ENV{ID_MM_MTK_CCCI_SIM_SLOT}="1", ENV{ID_MM_MTK_CCCI_DATA_APN}="jionet", GOTO="cmf_mm_ccci_end"
+KERNEL=="wwan0mipc1", ENV{ID_MM_MTK_CCCI_MIPC_DATA}="1", GOTO="cmf_mm_ccci_end"
+ENV{ID_MM_PORT_IGNORE}="1"
+LABEL="cmf_mm_ccci_end"

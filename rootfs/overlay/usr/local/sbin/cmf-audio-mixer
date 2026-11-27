@@ -1,0 +1,38 @@
+#!/bin/sh
+# Native boot: the ALSA routing from session-audio.sh (speaker/earpiece/mics),
+# applied once at boot as root. The PipeWire nodes live in the user's
+# ~/.config/pipewire/pipewire.conf.d/50-cmf-nodes.conf.
+set -eu
+a=/usr/bin/amixer
+[ -x "$a" ] || a=amixer
+for i in $(seq 1 30); do "$a" -c C1 info >/dev/null 2>&1 && break; sleep 1; done
+mix() { "$a" -q -c C1 cset "name=$1" "$2"; }
+mix 'Handset Volume' 7
+if "$a" -c C1 cget "name=Speaker Switch" >/dev/null 2>&1; then
+	mix 'PCM Playback Volume' 360
+	mix 'ADDA_DL_CH1 DL0_CH1' 0
+	mix 'ADDA_DL_CH2 DL0_CH2' 0
+	mix 'I2SOUT4_CH1 DL0_CH1' 1
+	mix 'I2SOUT4_CH2 DL0_CH2' 1
+	mix 'Speaker Switch' on
+	echo "cmf-audio: speaker path"
+else
+	mix 'ADDA_DL_CH1 DL0_CH1' 1
+	mix 'ADDA_DL_CH2 DL0_CH2' 1
+	echo "cmf-audio: earpiece path (no Speaker Switch)"
+fi
+mix 'RCV Mux' 'Voice Playback'
+mix 'Earpiece Switch' on
+mix 'UL_SRC_MUX' AMIC
+mix 'MISO0_MUX' UL1_CH1
+mix 'MISO1_MUX' UL1_CH2
+mix 'UL0_CH1 ADDA_UL_CH1' 1
+mix 'UL0_CH2 ADDA_UL_CH2' 1
+mix 'PGA1 Volume' 2
+mix 'PGA2 Volume' 2
+mix 'PGA_L_Mux' AIN0
+mix 'PGA_R_Mux' AIN2
+mix 'ADC_L_Mux' 'Left Preamplifier'
+mix 'ADC_R_Mux' 'Right Preamplifier'
+mix 'Mic input 0 Switch' on
+mix 'Mic input 2 Switch' on

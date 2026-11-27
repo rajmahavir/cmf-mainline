@@ -1,0 +1,18 @@
+[Unit]
+Description=CMF Phone 1 modem power-up (MT6878 CCCI, IMS provisioning)
+After=systemd-udevd.service sys-kernel-debug.mount cmf-speechd.service local-fs.target
+Wants=cmf-speechd.service
+Before=ModemManager.service
+ConditionPathExists=/sys/module/mtk_ccci
+ConditionPathExists=/usr/local/lib/cmf-modem/t2-modemd
+
+[Service]
+Type=notify
+NotifyAccess=all
+ExecStart=/usr/local/sbin/cmf-modem-start
+ExecStopPost=/usr/local/sbin/cmf-modem-stop
+TimeoutStartSec=240
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+# CMF: stream the journal (userspace only) to your log receiver UDP 5515.
+# Kernel lines are left out (_TRANSPORT=kernel): cmf-crashlog-kmsg already sends them.
+[Unit]
+Description=CMF crash log: stream journal to your log receiver
+After=tailscaled.service network-online.target
+Wants=network-online.target
+[Service]
+ExecStart=/bin/bash -c "exec 3>/dev/udp/RECEIVER_IP/5515; exec journalctl -f -n 0 -o short-monotonic --no-hostname --no-pager _TRANSPORT=journal _TRANSPORT=syslog _TRANSPORT=stdout _TRANSPORT=driver _TRANSPORT=audit >&3"
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target

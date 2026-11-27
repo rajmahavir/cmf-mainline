@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+/* Stock CMF gpio_usage_mapping and both MD1 SIM EINT nodes. */
+&{/soc@0/mddriver@d180000} {
+	mediatek,md-gpio-names =
+		"GPIO_FDD_Band_Support_Detection_1", "GPIO_FDD_Band_Support_Detection_2",
+		"GPIO_FDD_Band_Support_Detection_3", "GPIO_FDD_Band_Support_Detection_4",
+		"GPIO_SIM1_HOT_PLUG", "GPIO_SIM2_HOT_PLUG",
+		"GPIO_SIM1_SCLK", "GPIO_SIM1_SRST", "GPIO_SIM1_SIO",
+		"GPIO_SIM2_SCLK", "GPIO_SIM2_SRST", "GPIO_SIM2_SIO";
+	mediatek,md-gpios =
+		<&cmf_md_pio 68 0>, <&cmf_md_pio 70 0>,
+		<&cmf_md_pio 3 0>, <&cmf_md_pio 2 0>,
+		<&cmf_md_pio 46 0>, <&cmf_md_pio 47 0>,
+		<&cmf_md_pio 83 0>, <&cmf_md_pio 84 0>, <&cmf_md_pio 85 0>,
+		<&cmf_md_pio 86 0>, <&cmf_md_pio 87 0>, <&cmf_md_pio 88 0>;
+	mediatek,md-sim-eints = <0 10 0 0 0 0 1>, <1 10 0 0 0 0 2>;
+	/* Channel and raw reading recorded on this handset in stock Android. */
+	mediatek,md-adc = <19 13>;
+};

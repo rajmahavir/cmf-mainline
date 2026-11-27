@@ -1,0 +1,1129 @@
+From 94c8027d53f1ed0f9fafe7614086193daa7766fb Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:09 +0000
+Subject: [PATCH 01/13] dt-bindings: mediatek: mt6878: display, GCE, voter and
+ power IDs
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ .../bindings/arm/mediatek/mediatek,mmsys.yaml |  49 ++++++-
+ .../mediatek,mt6878-mmsys0-native.yaml        |  57 ++++++++
+ .../mediatek,mt6878-display-clock-voter.yaml  |  90 ++++++++++++
+ .../clock/mediatek,mt6878-display-gates.yaml  |  86 ++++++++++++
+ .../clock/mediatek,mt6878-gce-clocks.yaml     |  53 +++++++
+ .../clock/mediatek,mt6878-mdpsys.yaml         |  53 +++++++
+ .../display/mediatek/mediatek,dsc.yaml        |   1 +
+ .../display/mediatek/mediatek,dsi.yaml        |   1 +
+ .../display/mediatek/mediatek,ovl-2l.yaml     |  23 ++-
+ .../bindings/gpu/arm,mali-valhall-csf.yaml    |  22 +++
+ .../mailbox/mediatek,mt8196-gpueb-mbox.yaml   |  20 ++-
+ .../mediatek,mt6878-smi-larb-native.yaml      |  54 ++++++++
+ .../mediatek,mt6878-smi-native.yaml           |  85 ++++++++++++
+ .../devicetree/bindings/mmc/mtk-sd.yaml       |  30 ++++
+ .../bindings/phy/mediatek,dsi-phy.yaml        |  24 ++++
+ ...iatek,mt6878-display-power-controller.yaml | 131 ++++++++++++++++++
+ .../bindings/soc/mediatek/mediatek,mutex.yaml |  15 ++
+ .../clock/mediatek,mt6878-display-gates.h     |   9 ++
+ .../clock/mediatek,mt6878-display-voter.h     |   9 ++
+ .../clock/mediatek,mt6878-gce-clocks.h        |   8 ++
+ .../dt-bindings/power/mediatek,mt6878-power.h |  10 ++
+ 21 files changed, 827 insertions(+), 3 deletions(-)
+ create mode 100644 Documentation/devicetree/bindings/arm/mediatek/mediatek,mt6878-mmsys0-native.yaml
+ create mode 100644 Documentation/devicetree/bindings/clock/mediatek,mt6878-display-clock-voter.yaml
+ create mode 100644 Documentation/devicetree/bindings/clock/mediatek,mt6878-display-gates.yaml
+ create mode 100644 Documentation/devicetree/bindings/clock/mediatek,mt6878-gce-clocks.yaml
+ create mode 100644 Documentation/devicetree/bindings/clock/mediatek,mt6878-mdpsys.yaml
+ create mode 100644 Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-larb-native.yaml
+ create mode 100644 Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-native.yaml
+ create mode 100644 Documentation/devicetree/bindings/power/mediatek,mt6878-display-power-controller.yaml
+ create mode 100644 include/dt-bindings/clock/mediatek,mt6878-display-gates.h
+ create mode 100644 include/dt-bindings/clock/mediatek,mt6878-display-voter.h
+ create mode 100644 include/dt-bindings/clock/mediatek,mt6878-gce-clocks.h
+ create mode 100644 include/dt-bindings/power/mediatek,mt6878-power.h
+
+diff --git a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+index 3f4262e93..111bf6b21 100644
+--- a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mmsys.yaml
+@@ -27,6 +27,8 @@ properties:
+               - mediatek,mt6779-mmsys
+               - mediatek,mt6795-mmsys
+               - mediatek,mt6797-mmsys
++              - mediatek,mt6878-mmsys0
++              - mediatek,mt6878-mmsys0-native
+               - mediatek,mt8167-mmsys
+               - mediatek,mt8173-mmsys
+               - mediatek,mt8183-mmsys
+@@ -59,6 +61,13 @@ properties:
+           - const: mediatek,mt8195-mmsys
+           - const: syscon
+ 
++  clocks:
++    maxItems: 1
++
++  clock-names:
++    items:
++      - const: bus
++
+   reg:
+     maxItems: 1
+ 
+@@ -124,7 +133,45 @@ properties:
+ required:
+   - compatible
+   - reg
+-  - "#clock-cells"
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - mediatek,mt6878-mmsys0
++              - mediatek,mt6878-mmsys0-native
++      required:
++        - compatible
++    then:
++      required:
++        - clocks
++        - clock-names
++        - power-domains
++      properties:
++        clocks:
++          description: Clock supplying the MMSYS configuration bus.
++        power-domains:
++          maxItems: 1
++    else:
++      properties:
++        clocks: false
++        clock-names: false
++
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-mmsys0-native
++    then:
++      properties:
++        '#clock-cells': false
++        mboxes: false
++        mediatek,gce-client-reg: false
++    else:
++      required:
++        - '#clock-cells'
+ 
+ additionalProperties: false
+ 
+diff --git a/Documentation/devicetree/bindings/arm/mediatek/mediatek,mt6878-mmsys0-native.yaml b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mt6878-mmsys0-native.yaml
+new file mode 100644
+index 000000000..e3810333a
+--- /dev/null
++++ b/Documentation/devicetree/bindings/arm/mediatek/mediatek,mt6878-mmsys0-native.yaml
+@@ -0,0 +1,57 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/arm/mediatek/mediatek,mt6878-mmsys0-native.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 native MMSYS route controller
++
++maintainers:
++  - Matthias Brugger <matthias.bgg@gmail.com>
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++
++description:
++  Powered MMSYS route and DSI-lane controller. Gate clocks are registered by
++  the independent mediatek,mt6878-display-gates provider, which shares this
++  configuration bank. This node does not register a clock-provider child.
++  This split permits DISP registration before the powered controller probes.
++
++properties:
++  compatible:
++    const: mediatek,mt6878-mmsys0-native
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    maxItems: 1
++    description: Top-level DISP vote supplying the configuration bus.
++
++  clock-names:
++    const: bus
++
++  power-domains:
++    maxItems: 1
++    description: DISP power domain.
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - clock-names
++  - power-domains
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/mediatek,mt6878-display-voter.h>
++    #include <dt-bindings/power/mediatek,mt6878-power.h>
++
++    system-controller@14000000 {
++        compatible = "mediatek,mt6878-mmsys0-native";
++        reg = <0x14000000 0x1000>;
++        clocks = <&display_voter CLK_MT6878_DISP_VOTE>;
++        clock-names = "bus";
++        power-domains = <&display_power MT6878_POWER_DOMAIN_DISP>;
++    };
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6878-display-clock-voter.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6878-display-clock-voter.yaml
+new file mode 100644
+index 000000000..1ee88dfb5
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6878-display-clock-voter.yaml
+@@ -0,0 +1,90 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/mediatek,mt6878-display-clock-voter.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 display clock voter
++
++maintainers:
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++  - Matthias Brugger <mbrugger@suse.com>
++
++description: |
++  Two clock vote gates parented by the existing TOPCKGEN DISP0 and MMINFRA
++  selectors. The voter writes separate HWV vote registers and waits for the
++  corresponding TOPCKGEN physical gate to open. Existing mux IDs and operations
++  are unchanged. Output IDs are defined in mediatek,mt6878-display-voter.h.
++  Both votes must be idle and unowned for cold registration. This fixed built-in
++  provider cannot be removed while a failed transaction retains parent clocks;
++  recovery of a latched fault requires reboot. It does not perform firmware
++  display takeover or provide power ownership for downstream gate providers.
++
++properties:
++  mediatek,retain-boot-clocks:
++    type: boolean
++    description: |
++      Retain inherited enabled clocks as critical until reboot. Requires
++      coherent live hardware state and fixed built-in ownership. The gate
++      provider also requires retention on its native display voter parent.
++      This is a staged boot-adoption mode; domain adoption is separate.
++
++  mediatek,acquire-boot-clock-votes:
++    type: boolean
++    description: |
++      Add missing AP votes for both physically enabled boot clocks. Use only
++      after firmware has transferred clock control and the boot owner will
++      preserve the live clock state through acquisition. Requires retained
++      registration. The provider pins the upstream references and rate
++      protection before adding votes and keeps them until reboot.
++
++  compatible:
++    const: mediatek,mt6878-display-clock-voter
++
++  mediatek,topckgen:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: MT6878 TOPCKGEN syscon also supplying both input clocks.
++
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Separate hardware voter syscon register bank.
++
++  clocks:
++    items:
++      - description: TOPCKGEN CLK_TOP_DISP0_SEL input.
++      - description: TOPCKGEN CLK_TOP_MMINFRA_SEL input.
++
++  clock-names:
++    items:
++      - const: disp
++      - const: mminfra
++
++  '#clock-cells':
++    const: 1
++
++required:
++  - compatible
++  - mediatek,topckgen
++  - mediatek,hardware-voter
++  - clocks
++  - clock-names
++  - '#clock-cells'
++
++dependencies:
++  mediatek,acquire-boot-clock-votes: ["mediatek,retain-boot-clocks"]
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/mediatek,mt6878-clock.h>
++
++    clock-controller {
++        compatible = "mediatek,mt6878-display-clock-voter";
++        mediatek,topckgen = <&topckgen>;
++        mediatek,hardware-voter = <&hwv>;
++        clocks = <&topckgen CLK_TOP_DISP0_SEL>,
++                 <&topckgen CLK_TOP_MMINFRA_SEL>;
++        clock-names = "disp", "mminfra";
++        #clock-cells = <1>;
++    };
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6878-display-gates.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6878-display-gates.yaml
+new file mode 100644
+index 000000000..7505701a8
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6878-display-gates.yaml
+@@ -0,0 +1,86 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/mediatek,mt6878-display-gates.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 independent native display gate provider
++
++maintainers:
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++  - Matthias Brugger <mbrugger@suse.com>
++
++description: |
++  Registers MMSYS and MDPSYS clocks before the DISP power domain, avoiding a
++  clock-provider and power-domain registration cycle. The register resource is
++  the MDPSYS configuration bank. MMSYS configuration is shared with the native
++  route controller referenced by mediatek,mmsys. The old MMSYS and MDPSYS clock
++  providers must be disabled. Cold registration requires DISP off.
++  It does not acquire a DISP domain reference; consumers must hold that domain
++  before preparing a gate, except its own power sequence's SMI bootstrap clocks.
++  SPM state is checked before gate-bank access. No gate registers are accessed
++  by initial clock-state queries. This is not firmware takeover.
++  The first clock argument is MT6878_DISPLAY_GATE_MM or MT6878_DISPLAY_GATE_MDP
++  from mediatek,mt6878-display-gates.h; the second is the corresponding existing
++  CLK_MM_* or CLK_MDP_* ID from mediatek,mt6878-clock.h. Failed gate transactions
++  can pin parent references until reboot; this fixed built-in provider does not
++  support dynamic removal.
++
++properties:
++  mediatek,retain-boot-clocks:
++    type: boolean
++    description: |
++      Retain inherited enabled clocks as critical until reboot. Requires
++      coherent live hardware state and fixed built-in ownership. The gate
++      provider also requires retention on its native display voter parent.
++      This is a staged boot-adoption mode; domain adoption is separate.
++
++  compatible:
++    const: mediatek,mt6878-display-gates
++
++  reg:
++    maxItems: 1
++    description: MDPSYS configuration at 0x1f000000.
++
++  mediatek,mmsys:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Native MT6878 MMSYS route controller at 0x14000000.
++
++  mediatek,spm:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Always-on SPM syscon at 0x1c001000 providing DISP status.
++
++  clocks:
++    maxItems: 1
++    description: DISP vote output from the MT6878 display clock voter.
++
++  clock-names:
++    const: disp
++
++  '#clock-cells':
++    const: 2
++
++required:
++  - compatible
++  - reg
++  - mediatek,mmsys
++  - mediatek,spm
++  - clocks
++  - clock-names
++  - '#clock-cells'
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/mediatek,mt6878-display-voter.h>
++
++    clock-controller@1f000000 {
++        compatible = "mediatek,mt6878-display-gates";
++        reg = <0x1f000000 0x1000>;
++        mediatek,mmsys = <&mmsys>;
++        mediatek,spm = <&spm>;
++        clocks = <&display_voter CLK_MT6878_DISP_VOTE>;
++        clock-names = "disp";
++        #clock-cells = <2>;
++    };
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6878-gce-clocks.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6878-gce-clocks.yaml
+new file mode 100644
+index 000000000..a4ceca875
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6878-gce-clocks.yaml
+@@ -0,0 +1,53 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/mediatek,mt6878-gce-clocks.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 GCE-D clock votes
++
++maintainers:
++  - Houlong Wei <houlong.wei@mediatek.com>
++
++description: |
++  The MM_INFRA gate bank at 0x1e800000 exposes the GCE-D core and timer
++  clock status. Clock requests are issued through the hardware voter.
++  The consumer must keep this provider runtime-active in the MM_INFRA
++  power domain before preparing the clocks.
++
++properties:
++  compatible:
++    const: mediatek,mt6878-gce-clocks
++
++  reg:
++    maxItems: 1
++
++  "#clock-cells":
++    const: 1
++    description: Clock ID 0 for GCE-D or 2 for the timer.
++
++  clocks:
++    maxItems: 1
++    description: The native MM_INFRA parent vote.
++
++  clock-names:
++    const: mminfra
++
++  power-domains:
++    maxItems: 1
++    description: MM_INFRA from the native MT6878 display power controller.
++
++  mediatek,hardware-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Hardware-voter syscon at 0x10320000.
++
++required:
++  - compatible
++  - reg
++  - "#clock-cells"
++  - clocks
++  - clock-names
++  - power-domains
++  - mediatek,hardware-voter
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/clock/mediatek,mt6878-mdpsys.yaml b/Documentation/devicetree/bindings/clock/mediatek,mt6878-mdpsys.yaml
+new file mode 100644
+index 000000000..3968b8bed
+--- /dev/null
++++ b/Documentation/devicetree/bindings/clock/mediatek,mt6878-mdpsys.yaml
+@@ -0,0 +1,53 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/clock/mediatek,mt6878-mdpsys.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 MDPSYS clock controller
++
++maintainers:
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++  - Matthias Brugger <mbrugger@suse.com>
++
++description:
++  MDPSYS provides twelve gate clocks, including the SMI gate used by the DISP
++  power sequence. Gate IDs are defined in mediatek,mt6878-clock.h. The input
++  is TOPCKGEN's DISP0 clock. This is a clock provider, not an MDP engine driver.
++
++properties:
++  compatible:
++    const: mediatek,mt6878-mdpsys
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    maxItems: 1
++
++  clock-names:
++    const: disp0
++
++  '#clock-cells':
++    const: 1
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - clock-names
++  - '#clock-cells'
++
++additionalProperties: false
++
++examples:
++  - |
++    #include <dt-bindings/clock/mediatek,mt6878-clock.h>
++
++    clock-controller@1f000000 {
++        compatible = "mediatek,mt6878-mdpsys";
++        reg = <0x1f000000 0x1000>;
++        clocks = <&topckgen CLK_TOP_DISP0>;
++        clock-names = "disp0";
++        #clock-cells = <1>;
++    };
+diff --git a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml
+index a5b88eb97..e49d5d574 100644
+--- a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml
++++ b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsc.yaml
+@@ -21,6 +21,7 @@ properties:
+   compatible:
+     oneOf:
+       - enum:
++          - mediatek,mt6878-disp-dsc
+           - mediatek,mt8195-disp-dsc
+       - items:
+           - const: mediatek,mt8188-disp-dsc
+diff --git a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml
+index 27ffbccc2..7769c4e6b 100644
+--- a/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml
++++ b/Documentation/devicetree/bindings/display/mediatek/mediatek,dsi.yaml
+@@ -24,6 +24,7 @@ properties:
+     oneOf:
+       - enum:
+           - mediatek,mt2701-dsi
++          - mediatek,mt6878-dsi
+           - mediatek,mt7623-dsi
+           - mediatek,mt8167-dsi
+           - mediatek,mt8173-dsi
+diff --git a/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml b/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml
+index ac0d924a4..015f10493 100644
+--- a/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml
++++ b/Documentation/devicetree/bindings/display/mediatek/mediatek,ovl-2l.yaml
+@@ -22,6 +22,7 @@ properties:
+   compatible:
+     oneOf:
+       - enum:
++          - mediatek,mt6878-disp-ovl-2l
+           - mediatek,mt8183-disp-ovl-2l
+           - mediatek,mt8192-disp-ovl-2l
+       - items:
+@@ -44,6 +45,10 @@ properties:
+     items:
+       - description: OVL-2L Clock
+ 
++  memory-region:
++    maxItems: 1
++    description: Reserved coherent scanout pool for MT6878 with direct DMA.
++
+   iommus:
+     minItems: 1
+     maxItems: 2
+@@ -84,7 +89,23 @@ required:
+   - interrupts
+   - power-domains
+   - clocks
+-  - iommus
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6878-disp-ovl-2l
++    then:
++      properties:
++        iommus: false
++        mediatek,gce-client-reg: false
++      required:
++        - memory-region
++    else:
++      properties:
++        memory-region: false
++      required:
++        - iommus
+ 
+ additionalProperties: false
+ 
+diff --git a/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml b/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml
+index 8eccd4338..8dcfb86ef 100644
+--- a/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml
++++ b/Documentation/devicetree/bindings/gpu/arm,mali-valhall-csf.yaml
+@@ -18,6 +18,7 @@ properties:
+     oneOf:
+       - items:
+           - enum:
++              - mediatek,mt6878-mali
+               - mediatek,mt8196-mali
+               - nxp,imx95-mali            # G310
+               - rockchip,rk3588-mali
+@@ -146,6 +147,27 @@ allOf:
+         - nvmem-cells
+         - nvmem-cell-names
+         - power-domains
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-mali
++    then:
++      properties:
++        mali-supply: false
++        sram-supply: false
++        operating-points-v2: false
++        power-domains:
++          maxItems: 1
++        power-domain-names: false
++        clocks:
++          maxItems: 2
++        clock-names:
++          items:
++            - const: core
++            - const: stacks
++      required:
++        - power-domains
+ 
+ examples:
+   - |
+diff --git a/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml b/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
+index ab5b780cb..cf5d45a51 100644
+--- a/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
++++ b/Documentation/devicetree/bindings/mailbox/mediatek,mt8196-gpueb-mbox.yaml
+@@ -12,6 +12,7 @@ maintainers:
+ properties:
+   compatible:
+     enum:
++      - mediatek,mt6878-gpueb-mbox
+       - mediatek,mt8196-gpueb-mbox
+ 
+   reg:
+@@ -41,10 +42,27 @@ required:
+   - compatible
+   - reg
+   - reg-names
+-  - clocks
+   - interrupts
+   - "#mbox-cells"
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt8196-gpueb-mbox
++    then:
++      required:
++        - clocks
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-gpueb-mbox
++    then:
++      properties:
++        clocks: false
++
+ additionalProperties: false
+ 
+ examples:
+diff --git a/Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-larb-native.yaml b/Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-larb-native.yaml
+new file mode 100644
+index 000000000..fbbc61b31
+--- /dev/null
++++ b/Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-larb-native.yaml
+@@ -0,0 +1,54 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/memory-controllers/mediatek,mt6878-smi-larb-native.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 native display SMI local arbiters
++
++maintainers:
++  - Yong Wu <yong.wu@mediatek.com>
++
++description: |
++  Display larb0 and larb1 occupy 4 KiB at 0x1401e000 and 0x1401f000
++  respectively. Each uses the MMSYS SMI_COMMON gate as its only clock and
++  depends on the native display SMI common at 0x1e801000. The display power
++  and IOMMU providers establish cold ownership before a DMA client can run.
++
++properties:
++  compatible:
++    const: mediatek,mt6878-smi-larb-native
++
++  reg:
++    maxItems: 1
++
++  clocks:
++    maxItems: 1
++    description: MMSYS SMI_COMMON gate for register access.
++
++  clock-names:
++    const: apb
++
++  power-domains:
++    maxItems: 1
++    description: DISP (8) from the native MT6878 display power controller.
++
++  mediatek,smi:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Phandle to the MT6878 native display SMI common.
++
++  mediatek,larb-id:
++    $ref: /schemas/types.yaml#/definitions/uint32
++    enum: [0, 1]
++    description: Hardware local arbiter ID corresponding to the register bank.
++
++required:
++  - compatible
++  - reg
++  - clocks
++  - clock-names
++  - power-domains
++  - mediatek,smi
++  - mediatek,larb-id
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-native.yaml b/Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-native.yaml
+new file mode 100644
+index 000000000..1a455f277
+--- /dev/null
++++ b/Documentation/devicetree/bindings/memory-controllers/mediatek,mt6878-smi-native.yaml
+@@ -0,0 +1,85 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/memory-controllers/mediatek,mt6878-smi-native.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 native display SMI Gen3 commons
++
++maintainers:
++  - Yong Wu <yong.wu@mediatek.com>
++
++description: |
++  The display common at 0x1e801000 has two independent sub-common suppliers,
++  SSC0 at 0x1e807000 and SSC1 at 0x1e808000. The GCE 3x1 sub-common at
++  0x1e809000 depends on the display common. All four 4 KiB banks belong to MM_INFRA. These profiles have no separate clock inputs. This is
++  a native ownership interface, without the vendor initialization-on-probe
++  or decoupled-power properties. The native display power provider must
++  already have established exclusive, cold ownership; firmware takeover is
++  not performed by these nodes. System sleep and live removal are unsupported.
++
++properties:
++  compatible:
++    enum:
++      - mediatek,mt6878-smi-common-native
++      - mediatek,mt6878-smi-sub-common-native
++      - mediatek,mt6878-smi-gce-sub-common-native
++
++  reg:
++    maxItems: 1
++
++  power-domains:
++    maxItems: 1
++    description: |
++      The dedicated mediatek,mt6878-display-power-controller provider with
++      one argument, MM_INFRA (7), shared by the common and both suppliers.
++
++  mediatek,smi-suppliers:
++    $ref: /schemas/types.yaml#/definitions/phandle-array
++    minItems: 1
++    maxItems: 2
++    items:
++      maxItems: 1
++    description: |
++      Display common references SSC0 then SSC1. The GCE sub-common references
++      display common. Each consumer holds explicit runtime references to its
++      suppliers while active.
++
++required:
++  - compatible
++  - reg
++  - power-domains
++
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-smi-common-native
++    then:
++      properties:
++        mediatek,smi-suppliers:
++          minItems: 2
++      required:
++        - mediatek,smi-suppliers
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-smi-gce-sub-common-native
++    then:
++      properties:
++        mediatek,smi-suppliers:
++          maxItems: 1
++      required:
++        - mediatek,smi-suppliers
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-smi-sub-common-native
++    then:
++      properties:
++        mediatek,smi-suppliers: false
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/mmc/mtk-sd.yaml b/Documentation/devicetree/bindings/mmc/mtk-sd.yaml
+index a4d032224..d55b672d9 100644
+--- a/Documentation/devicetree/bindings/mmc/mtk-sd.yaml
++++ b/Documentation/devicetree/bindings/mmc/mtk-sd.yaml
+@@ -17,6 +17,7 @@ properties:
+           - mediatek,mt2701-mmc
+           - mediatek,mt2712-mmc
+           - mediatek,mt6779-mmc
++          - mediatek,mt6878-mmc
+           - mediatek,mt6795-mmc
+           - mediatek,mt7620-mmc
+           - mediatek,mt7622-mmc
+@@ -238,6 +239,7 @@ allOf:
+         compatible:
+           contains:
+             enum:
++              - mediatek,mt6878-mmc
+               - mediatek,mt7986-mmc
+               - mediatek,mt7988-mmc
+               - mediatek,mt8183-mmc
+@@ -375,6 +377,34 @@ allOf:
+             - const: axi_cg
+             - const: crypto
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-mmc
++    then:
++      properties:
++        clocks:
++          minItems: 7
++          items:
++            - description: source clock
++            - description: host clock gate
++            - description: independent source clock gate
++            - description: bus clock mux
++            - description: pad macro clock gate
++            - description: peripheral bus clock gate
++            - description: AXI bus clock gate
++        clock-names:
++          minItems: 7
++          items:
++            - const: source
++            - const: hclk
++            - const: source_cg
++            - const: bus_clk
++            - const: sys_cg
++            - const: pclk_cg
++            - const: axi_cg
++
+ unevaluatedProperties: false
+ 
+ examples:
+diff --git a/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml b/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
+index c6d0bbdbe..8c8e3e431 100644
+--- a/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
++++ b/Documentation/devicetree/bindings/phy/mediatek,dsi-phy.yaml
+@@ -39,6 +39,11 @@ properties:
+       - const: mediatek,mt2701-mipi-tx
+       - const: mediatek,mt8173-mipi-tx
+       - const: mediatek,mt8183-mipi-tx
++      - const: mediatek,mt6878-mipi-tx
++
++  mediatek,mmsys:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Powered MMSYS0 supplier for MT6878 DSI0 identity lane selection.
+ 
+   reg:
+     maxItems: 1
+@@ -80,6 +85,25 @@ required:
+   - "#phy-cells"
+   - "#clock-cells"
+ 
++allOf:
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: mediatek,mt6878-mipi-tx
++      required:
++        - compatible
++    then:
++      properties:
++        # MT6878 preserves firmware trim and uses the vendor fixed drive setting.
++        nvmem-cells: false
++        nvmem-cell-names: false
++        drive-strength-microamp: false
++
++    else:
++      properties:
++        mediatek,mmsys: false
++
+ additionalProperties: false
+ 
+ examples:
+diff --git a/Documentation/devicetree/bindings/power/mediatek,mt6878-display-power-controller.yaml b/Documentation/devicetree/bindings/power/mediatek,mt6878-display-power-controller.yaml
+new file mode 100644
+index 000000000..09a398990
+--- /dev/null
++++ b/Documentation/devicetree/bindings/power/mediatek,mt6878-display-power-controller.yaml
+@@ -0,0 +1,131 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/power/mediatek,mt6878-display-power-controller.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: MediaTek MT6878 display power hierarchy
++
++maintainers:
++  - AngeloGioacchino Del Regno <angelogioacchino.delregno@collabora.com>
++  - Matthias Brugger <mbrugger@suse.com>
++
++description: |
++  This controller is a child of the SPM syscon and a sibling of the existing
++  connectivity power controller. MM_INFRA (7) uses the separate hardware voter
++  syscon and parents the direct SPM-controlled DISP domain (8). The driver
++  requires both domains to be idle and off for cold registration. Firmware
++  display takeover is a prerequisite for both registration modes. The
++  existing connectivity controller and its domain IDs remain unchanged.
++
++properties:
++  mediatek,retain-boot-display:
++    type: boolean
++    description: |
++      Adopt coherent powered MM_INFRA and DISP domains with critical boot
++      voter clocks and both DISP SMI gates already retained. Keep both domains
++      on until reboot. System
++      sleep and dynamic removal are unsupported in this mode.
++
++  mediatek,boot-on-adoption:
++    type: boolean
++    description: |
++      Trial-only adoption of the already-powered LK display. Requires the
++      retained clock and gate checks and adds a missing MM_INFRA AP power
++      vote. Allows DISP status bit 18 with all DISP protection requests
++      clear. Both domains remain on until reboot.
++
++  $nodename:
++    const: display-power-controller
++
++  compatible:
++    const: mediatek,mt6878-display-power-controller
++
++  '#power-domain-cells':
++    const: 1
++
++  '#address-cells':
++    const: 1
++
++  '#size-cells':
++    const: 0
++
++  mediatek,hw-voter:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Separate hardware voter syscon register bank.
++
++  access-controllers:
++    minItems: 1
++    maxItems: 1
++    description: INFRACFG register bank providing DISP bus protection.
++
++  power-domain@7:
++    $ref: /schemas/power/mediatek,power-controller.yaml#/$defs/power-domain-node
++    type: object
++    properties:
++      reg:
++        const: 7
++      '#power-domain-cells':
++        const: 0
++      '#address-cells':
++        const: 1
++      '#size-cells':
++        const: 0
++      clocks:
++        maxItems: 1
++      clock-names:
++        items:
++          - const: mm_infra
++      domain-supply: false
++      mediatek,infracfg: false
++      mediatek,infracfg-nao: false
++      mediatek,smi: false
++      power-domain@8:
++        $ref: /schemas/power/mediatek,power-controller.yaml#/$defs/power-domain-node
++        type: object
++        properties:
++          reg:
++            const: 8
++          '#power-domain-cells':
++            const: 0
++          '#address-cells': false
++          '#size-cells': false
++          clocks:
++            minItems: 3
++            maxItems: 3
++          clock-names:
++            items:
++              - const: disp
++              - const: disp0-0
++              - const: disp0-1
++          domain-supply: false
++          mediatek,infracfg: false
++          mediatek,infracfg-nao: false
++          mediatek,smi: false
++        required:
++          - '#power-domain-cells'
++          - clocks
++          - clock-names
++        unevaluatedProperties: false
++    required:
++      - '#power-domain-cells'
++      - '#address-cells'
++      - '#size-cells'
++      - clocks
++      - clock-names
++      - power-domain@8
++    unevaluatedProperties: false
++
++required:
++  - compatible
++  - '#power-domain-cells'
++  - '#address-cells'
++  - '#size-cells'
++  - mediatek,hw-voter
++  - access-controllers
++  - power-domain@7
++
++dependencies:
++  mediatek,boot-on-adoption: ["mediatek,retain-boot-display"]
++
++additionalProperties: false
+diff --git a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
+index 5267cfe92..e9350ef16 100644
+--- a/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
++++ b/Documentation/devicetree/bindings/soc/mediatek/mediatek,mutex.yaml
+@@ -27,6 +27,7 @@ properties:
+       - mediatek,mt2701-disp-mutex
+       - mediatek,mt2712-disp-mutex
+       - mediatek,mt6795-disp-mutex
++      - mediatek,mt6878-disp-mutex
+       - mediatek,mt8167-disp-mutex
+       - mediatek,mt8173-disp-mutex
+       - mediatek,mt8183-disp-mutex
+@@ -82,6 +83,7 @@ allOf:
+               - mediatek,mt2701-disp-mutex
+               - mediatek,mt2712-disp-mutex
+               - mediatek,mt6795-disp-mutex
++              - mediatek,mt6878-disp-mutex
+               - mediatek,mt8173-disp-mutex
+               - mediatek,mt8186-disp-mutex
+               - mediatek,mt8186-mdp3-mutex
+@@ -91,6 +93,19 @@ allOf:
+       required:
+         - clocks
+ 
++  - if:
++      properties:
++        compatible:
++          const: mediatek,mt6878-disp-mutex
++      required:
++        - compatible
++    then:
++      properties:
++        power-domains:
++          maxItems: 1
++        mediatek,gce-events: false
++        mediatek,gce-client-reg: false
++
+ required:
+   - compatible
+   - reg
+diff --git a/include/dt-bindings/clock/mediatek,mt6878-display-gates.h b/include/dt-bindings/clock/mediatek,mt6878-display-gates.h
+new file mode 100644
+index 000000000..1469b6f15
+--- /dev/null
++++ b/include/dt-bindings/clock/mediatek,mt6878-display-gates.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLK_MT6878_DISPLAY_GATES_H
++#define _DT_BINDINGS_CLK_MT6878_DISPLAY_GATES_H
++
++/* First clock argument: bank. Second: existing CLK_MM_* or CLK_MDP_* ID. */
++#define MT6878_DISPLAY_GATE_MM	0
++#define MT6878_DISPLAY_GATE_MDP	1
++
++#endif
+diff --git a/include/dt-bindings/clock/mediatek,mt6878-display-voter.h b/include/dt-bindings/clock/mediatek,mt6878-display-voter.h
+new file mode 100644
+index 000000000..9b4d5c7ce
+--- /dev/null
++++ b/include/dt-bindings/clock/mediatek,mt6878-display-voter.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLK_MT6878_DISPLAY_VOTER_H
++#define _DT_BINDINGS_CLK_MT6878_DISPLAY_VOTER_H
++
++#define CLK_MT6878_DISP_VOTE	0
++#define CLK_MT6878_MMINFRA_VOTE	1
++#define CLK_MT6878_DISPLAY_VOTE_NR	2
++
++#endif
+diff --git a/include/dt-bindings/clock/mediatek,mt6878-gce-clocks.h b/include/dt-bindings/clock/mediatek,mt6878-gce-clocks.h
+new file mode 100644
+index 000000000..f38d14465
+--- /dev/null
++++ b/include/dt-bindings/clock/mediatek,mt6878-gce-clocks.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
++#ifndef _DT_BINDINGS_CLK_MT6878_GCE_CLOCKS_H
++#define _DT_BINDINGS_CLK_MT6878_GCE_CLOCKS_H
++
++#define CLK_MT6878_GCE_D	0
++#define CLK_MT6878_GCE_TIMER	2
++
++#endif
+diff --git a/include/dt-bindings/power/mediatek,mt6878-power.h b/include/dt-bindings/power/mediatek,mt6878-power.h
+new file mode 100644
+index 000000000..f97094580
+--- /dev/null
++++ b/include/dt-bindings/power/mediatek,mt6878-power.h
+@@ -0,0 +1,10 @@
++/* SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause */
++#ifndef _DT_BINDINGS_POWER_MEDIATEK_MT6878_H
++#define _DT_BINDINGS_POWER_MEDIATEK_MT6878_H
++
++#define MT6878_POWER_DOMAIN_CONN 1
++#define MT6878_POWER_DOMAIN_AUDIO 2
++#define MT6878_POWER_DOMAIN_MM_INFRA 7
++#define MT6878_POWER_DOMAIN_DISP 8
++
++#endif
+-- 
+2.53.0
+

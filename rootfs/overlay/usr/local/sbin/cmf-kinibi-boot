@@ -1,0 +1,50 @@
+#!/bin/sh
+# Stage 90: load FF-A (v1.0) and the Trustonic Kinibi driver after boot.
+# Runs in the host (boot profile) namespace from cmf-boot-session, like the
+# GPU autoload. Gates: /etc/cmf-kinibi-enable on the SD, a /mobicore node in
+# the device tree (Stage 90+ DTB), and modules built for the running kernel.
+# Crash guard: an attempt marker is written (and synced) before loading and
+# removed after; if a previous attempt never finished, loading is skipped
+# until the marker is deleted by hand.
+R=${CMF_ROOT-}   # root of the system (empty = /)
+bb=/bin/busybox
+rel=$("$bb" uname -r)
+M=$R/usr/local/lib/cmf-kinibi/$rel
+state=$R/var/lib/cmf-kinibi
+log=$R/var/log/cmf-kinibi.log
+"$bb" mkdir -p "$state" "${log%/*}"
+say() { echo "$("$bb" date -u +%FT%TZ) $*" >> "$log"; echo "cmf-kinibi: $*" > /dev/kmsg; }
+
+[ -e "$R/etc/cmf-kinibi-enable" ] || exit 0
+[ -d /proc/device-tree/mobicore ] || { say "no /mobicore DT node; skipped"; exit 0; }
+for m in ffa-core ffa-module mcDrvModule-ffa; do
+	[ -r "$M/$m.ko" ] || { say "missing $M/$m.ko for $rel; skipped"; exit 0; }
+done
+if [ -e "$state/attempt" ]; then
+	say "previous attempt ($("$bb" cat "$state/attempt")) did not finish; skipped. Delete $state/attempt to retry."
+	exit 0
+fi
+"$bb" grep -q '^mcDrvModule_ffa ' /proc/modules && { say "already loaded"; exit 0; }
+
+# Load after the native display is up, the order that was tested.
+i=0
+while [ "$i" -lt 60 ]; do
+	d=$("$bb" readlink /sys/class/drm/card0/device/driver 2>/dev/null)
+	[ "${d##*/}" = mediatek-drm ] && break
+	"$bb" sleep 1; i=$((i + 1))
+done
+"$bb" sleep 10
+
+"$bb" cat /proc/sys/kernel/random/boot_id > "$state/attempt" 2>/dev/null || echo unknown > "$state/attempt"
+"$bb" sync
+say "loading FF-A and Trustonic ($rel)"
+"$bb" grep -q '^ffa_core ' /proc/modules || "$bb" insmod "$M/ffa-core.ko" || { say "ffa-core failed"; "$bb" rm -f "$state/attempt"; exit 1; }
+"$bb" grep -q '^ffa_module ' /proc/modules || "$bb" insmod "$M/ffa-module.ko" || { say "ffa-module failed"; "$bb" rm -f "$state/attempt"; exit 1; }
+n=$("$bb" ls /sys/bus/arm_ffa/devices 2>/dev/null | "$bb" wc -l)
+say "FF-A partitions: $n"
+"$bb" insmod "$M/mcDrvModule-ffa.ko" || { say "mcDrvModule-ffa failed"; "$bb" rm -f "$state/attempt"; exit 1; }
+"$bb" sleep 1
+v=$("$M/../kinibi-version" 2>&1 | "$bb" tr '\n' ' ')
+say "Kinibi: $v"
+"$bb" rm -f "$state/attempt"
+"$bb" sync

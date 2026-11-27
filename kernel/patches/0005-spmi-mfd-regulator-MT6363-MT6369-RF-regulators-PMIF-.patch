@@ -1,0 +1,916 @@
+From bcce32c4177da3384b22ea3332d1fae77105bcc4 Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:09 +0000
+Subject: [PATCH 05/13] spmi/mfd/regulator: MT6363/MT6369 RF regulators, PMIF
+ and MT6685 audio regmap
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ drivers/mfd/Makefile                    |   1 +
+ drivers/mfd/mt6685-audio-regmap.c       |  72 ++++
+ drivers/regulator/Kconfig               |   7 +
+ drivers/regulator/Makefile              |   1 +
+ drivers/regulator/mt636x-rf-regulator.c | 441 ++++++++++++++++++++++++
+ drivers/spmi/spmi-mtk-pmif.c            | 159 ++++-----
+ 6 files changed, 596 insertions(+), 85 deletions(-)
+ create mode 100644 drivers/mfd/mt6685-audio-regmap.c
+ create mode 100644 drivers/regulator/mt636x-rf-regulator.c
+
+diff --git a/drivers/mfd/Makefile b/drivers/mfd/Makefile
+index dd4bb7e77..cf98f9584 100644
+--- a/drivers/mfd/Makefile
++++ b/drivers/mfd/Makefile
+@@ -303,3 +303,4 @@ obj-$(CONFIG_MFD_RSMU_SPI)	+= rsmu_spi.o rsmu_core.o
+ obj-$(CONFIG_MFD_UPBOARD_FPGA)	+= upboard-fpga.o
+ 
+ obj-$(CONFIG_MFD_LOONGSON_SE)	+= loongson-se.o
++obj-$(CONFIG_SND_SOC_MT6878_CMF) += mt6685-audio-regmap.o
+diff --git a/drivers/mfd/mt6685-audio-regmap.c b/drivers/mfd/mt6685-audio-regmap.c
+new file mode 100644
+index 000000000..325bb6323
+--- /dev/null
++++ b/drivers/mfd/mt6685-audio-regmap.c
+@@ -0,0 +1,72 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_platform.h>
++#include <linux/regmap.h>
++#include <linux/spmi.h>
++
++#define MT6685_DCXO_EXTBUF5_CW0 0x79e
++#define MT6685_DCXO_DIGCLK_ELR 0x7f4
++
++/* Only the audio-capable board binding exposes the switched BBCK5 buffer. */
++static bool mt6685_writeable(struct device *dev, unsigned int reg)
++{
++	return reg == MT6685_DCXO_EXTBUF5_CW0 &&
++	       of_device_is_compatible(dev->of_node, "mediatek,mt6685-consys-audio-regmap");
++}
++
++static bool mt6685_readable(struct device *dev, unsigned int reg)
++{
++	return reg == MT6685_DCXO_DIGCLK_ELR || mt6685_writeable(dev, reg);
++}
++
++static const struct regmap_config mt6685_clock_regmap = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = MT6685_DCXO_DIGCLK_ELR,
++	.readable_reg = mt6685_readable,
++	.writeable_reg = mt6685_writeable,
++	.fast_io = true,
++	.use_single_read = true,
++};
++
++static int mt6685_clock_probe(struct spmi_device *sdev)
++{
++	struct device *dev = &sdev->dev;
++	struct regmap *map;
++	unsigned int clock;
++	int ret;
++
++	map = devm_regmap_init_spmi_ext(sdev, &mt6685_clock_regmap);
++	if (IS_ERR(map))
++		return dev_err_probe(dev, PTR_ERR(map), "Cannot create clock regmap\n");
++
++	ret = regmap_read(map, MT6685_DCXO_DIGCLK_ELR, &clock);
++	if (ret)
++		return dev_err_probe(dev, ret, "Cannot read DCXO clock strap\n");
++
++	ret = devm_of_platform_populate(dev);
++	if (ret)
++		return dev_err_probe(dev, ret, "Cannot populate connectivity clock device\n");
++
++	dev_info(dev, "MT6685 DCXO strap bit: %u\n", clock & 1);
++	return 0;
++}
++
++static const struct of_device_id mt6685_clock_of_match[] = {
++	{ .compatible = "mediatek,mt6685-consys-audio-regmap" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mt6685_clock_of_match);
++
++static struct spmi_driver mt6685_clock_driver = {
++	.probe = mt6685_clock_probe,
++	.driver = {
++		.name = "mt6685-audio-regmap",
++		.of_match_table = mt6685_clock_of_match,
++	},
++};
++module_spmi_driver(mt6685_clock_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6685 diagnostic connectivity clock regmap");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index a54a54919..c7edbadbd 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -984,6 +984,13 @@ config REGULATOR_MT6363
+ 	  This driver supports the control of different power rails of device
+ 	  through regulator interface.
+ 
++config REGULATOR_MT636X_RF
++	tristate "MediaTek MT6363 and MT6369 RF regulators"
++	depends on SPMI && OF
++	select REGMAP_SPMI
++	help
++	  Enable the RF LDO regulators on the MT6363 and MT6369 SPMI PMICs.
++
+ config REGULATOR_MT6370
+ 	tristate "MT6370 SubPMIC Regulator"
+ 	depends on MFD_MT6370
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index 134eee274..8e668c23e 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -116,6 +116,7 @@ obj-$(CONFIG_REGULATOR_MT6358)	+= mt6358-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6359)	+= mt6359-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6360) += mt6360-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6363) += mt6363-regulator.o
++obj-$(CONFIG_REGULATOR_MT636X_RF) += mt636x-rf-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6370) += mt6370-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6380)	+= mt6380-regulator.o
+ obj-$(CONFIG_REGULATOR_MT6397)	+= mt6397-regulator.o
+diff --git a/drivers/regulator/mt636x-rf-regulator.c b/drivers/regulator/mt636x-rf-regulator.c
+new file mode 100644
+index 000000000..2b9905d07
+--- /dev/null
++++ b/drivers/regulator/mt636x-rf-regulator.c
+@@ -0,0 +1,441 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/* RF LDO register and voltage data from the MediaTek MT6363/MT6369 vendor drivers. */
++#include <linux/bits.h>
++#include <linux/delay.h>
++#include <linux/interrupt.h>
++#include <linux/irq.h>
++#include <linux/irqdomain.h>
++#include <linux/mutex.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/of_irq.h>
++#include <linux/of_platform.h>
++#include <linux/regmap.h>
++#include <linux/regulator/driver.h>
++#include <linux/spmi.h>
++
++#define MT636X_SWCID		0x000b
++#define MT636X_LDO_ENABLE	BIT(0)
++#define MT636X_LDO_LOW_POWER	BIT(1)
++#define MT636X_LDO_VOSEL	GENMASK(3, 0)
++
++struct mt636x_rf_chip {
++	const struct regulator_desc *rails;
++	unsigned int count;
++};
++
++static const unsigned int mt6363_vcn13_uv[] = {
++	900000, 1000000, 1100000, 1200000, 1300000, 1700000, 1800000, 1810000,
++};
++
++static const unsigned int mt636x_rfio_uv[] = {
++	600000, 700000, 800000, 900000, 1000000, 1100000, 1200000, 1300000,
++	1400000, 1500000, 1600000, 1700000, 1800000, 1900000, 2000000, 2100000,
++};
++
++static const unsigned int mt6369_vcn33_uv[] = {
++	1200000, 1300000, 1500000, 1700000, 1800000, 2000000, 2500000, 2600000,
++	2700000, 2800000, 2900000, 3000000, 3100000, 3300000, 3400000, 3500000,
++};
++
++static unsigned int mt636x_rf_map_mode(unsigned int mode)
++{
++	switch (mode) {
++	case 0:
++		return REGULATOR_MODE_NORMAL;
++	case 2:
++		return REGULATOR_MODE_IDLE;
++	default:
++		return REGULATOR_MODE_INVALID;
++	}
++}
++
++static unsigned int mt636x_rf_get_mode(struct regulator_dev *rdev)
++{
++	unsigned int value;
++	int ret;
++
++	ret = regmap_read(rdev->regmap, rdev->desc->enable_reg, &value);
++	if (ret)
++		return REGULATOR_MODE_INVALID;
++
++	return value & MT636X_LDO_LOW_POWER ? REGULATOR_MODE_IDLE : REGULATOR_MODE_NORMAL;
++}
++
++static int mt636x_rf_set_mode(struct regulator_dev *rdev, unsigned int mode)
++{
++	int ret;
++	bool changed;
++
++	if (mode != REGULATOR_MODE_NORMAL && mode != REGULATOR_MODE_IDLE)
++		return -EINVAL;
++
++	ret = regmap_update_bits_check(rdev->regmap, rdev->desc->enable_reg,
++				       MT636X_LDO_LOW_POWER,
++				       mode == REGULATOR_MODE_IDLE ? MT636X_LDO_LOW_POWER : 0,
++				       &changed);
++	if (!ret && changed && mode == REGULATOR_MODE_NORMAL)
++		udelay(100);
++
++	return ret;
++}
++
++static const struct regulator_ops mt636x_rf_ops = {
++	.enable = regulator_enable_regmap,
++	.disable = regulator_disable_regmap,
++	.is_enabled = regulator_is_enabled_regmap,
++	.list_voltage = regulator_list_voltage_table,
++	.map_voltage = regulator_map_voltage_iterate,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++	.get_mode = mt636x_rf_get_mode,
++	.set_mode = mt636x_rf_set_mode,
++};
++
++#define MT636X_RF_LDO(_id, _name, _control, _selector, _voltages) { \
++	.id = (_id), .name = (_name), .of_match = (_name), \
++	.regulators_node = "regulators", .type = REGULATOR_VOLTAGE, \
++	.owner = THIS_MODULE, .ops = &mt636x_rf_ops, \
++	.enable_reg = (_control), .enable_mask = MT636X_LDO_ENABLE, \
++	.vsel_reg = (_selector), .vsel_mask = MT636X_LDO_VOSEL, \
++	.volt_table = (_voltages), .n_voltages = ARRAY_SIZE(_voltages), \
++	.of_map_mode = mt636x_rf_map_mode, \
++}
++
++static const struct regulator_desc mt6363_rf_rails[] = {
++	MT636X_RF_LDO(0, "vcn13", 0x1d07, 0x1b3f, mt6363_vcn13_uv),
++	MT636X_RF_LDO(1, "vrfio18", 0x1bcd, 0x1f2c, mt636x_rfio_uv),
++};
++
++/* Card power follows the stock MT6369 VMCH_EINT_LOW sequence. */
++static int mt6369_vmch_eint_low_enable(struct regulator_dev *rdev)
++{
++	int ret;
++
++	ret = regmap_update_bits(rdev->regmap, 0x1ca3, BIT(2), 0);
++	if (ret)
++		return ret;
++	ret = regmap_update_bits(rdev->regmap, 0x1c95, BIT(0), BIT(0));
++	if (ret)
++		return ret;
++	return regulator_enable_regmap(rdev);
++}
++
++static int mt6369_vmch_eint_low_disable(struct regulator_dev *rdev)
++{
++	int ret;
++
++	ret = regmap_update_bits(rdev->regmap, 0x1c95, BIT(0), 0);
++	if (ret)
++		return ret;
++	udelay(1500);
++	return regulator_disable_regmap(rdev);
++}
++
++static const struct regulator_ops mt6369_vmch_eint_ops = {
++	.enable = mt6369_vmch_eint_low_enable,
++	.disable = mt6369_vmch_eint_low_disable,
++	.is_enabled = regulator_is_enabled_regmap,
++	.list_voltage = regulator_list_voltage_table,
++	.map_voltage = regulator_map_voltage_iterate,
++	.get_voltage_sel = regulator_get_voltage_sel_regmap,
++	.set_voltage_sel = regulator_set_voltage_sel_regmap,
++	.set_voltage_time_sel = regulator_set_voltage_time_sel,
++};
++
++static const struct regulator_desc mt6369_rf_rails[] = {
++	MT636X_RF_LDO(0, "vcn33-1", 0x1c3f, 0x1db1, mt6369_vcn33_uv),
++	MT636X_RF_LDO(1, "vcn33-2", 0x1c4d, 0x1db5, mt6369_vcn33_uv),
++	MT636X_RF_LDO(2, "vant18", 0x1cb2, 0x1e09, mt636x_rfio_uv),
++	MT636X_RF_LDO(3, "vmc", 0x1ca4, 0x1dad, mt6369_vcn33_uv),
++	MT636X_RF_LDO(5, "vtp", 0x1c15, 0x1da5, mt6369_vcn33_uv),
++	{
++		.id = 4, .name = "vmch-eint-low", .of_match = "vmch-eint-low",
++		.regulators_node = "regulators", .type = REGULATOR_VOLTAGE,
++		.owner = THIS_MODULE, .ops = &mt6369_vmch_eint_ops,
++		.enable_reg = 0x1ca3, .enable_mask = BIT(0),
++		.vsel_reg = 0x1da9, .vsel_mask = MT636X_LDO_VOSEL,
++		.volt_table = mt6369_vcn33_uv,
++		.n_voltages = ARRAY_SIZE(mt6369_vcn33_uv),
++	},
++};
++
++static const struct mt636x_rf_chip mt6363_rf = {
++	.rails = mt6363_rf_rails, .count = ARRAY_SIZE(mt6363_rf_rails),
++};
++
++static const struct mt636x_rf_chip mt6369_rf = {
++	.rails = mt6369_rf_rails, .count = ARRAY_SIZE(mt6369_rf_rails),
++};
++
++static const struct regmap_config mt636x_regmap_config = {
++	.reg_bits = 16,
++	.val_bits = 8,
++	.max_register = 0xffff,
++	.fast_io = true,
++};
++
++#define MT6363_IRQ_SUMMARY	0x04e
++#define MT6363_IRQ_SUMMARY_PSC	BIT(2)
++#define MT6363_RCS_INT_DONE	0x41b
++#define MT6363_PSC_IRQ_ENABLE	0x90f
++#define MT6363_PSC_IRQ_STATUS	0x91b
++#define MT6363_PSC_CHRDET_ENABLE	0x912
++#define MT6363_PSC_CHRDET_STATUS	0x91c
++#define MT6363_PSC_CHRDET_BITS	GENMASK(1, 0)
++#define MT6363_PSC_IRQ_BASE	48
++#define MT6363_PSC_IRQ_COUNT	8
++#define MT6363_PSC_KEY_BITS	(BIT(0) | BIT(1) | BIT(3) | BIT(4))
++
++struct mt6363_psc_irq {
++	struct device *dev;
++	struct regmap *regmap;
++	struct irq_domain *domain;
++	struct mutex lock;
++	unsigned int enabled;
++	bool armed;
++	int parent_irq;
++};
++
++static void mt6363_psc_bus_lock(struct irq_data *data)
++{
++	struct mt6363_psc_irq *psc = irq_data_get_irq_chip_data(data);
++
++	mutex_lock(&psc->lock);
++}
++
++static void mt6363_psc_bus_sync_unlock(struct irq_data *data)
++{
++	struct mt6363_psc_irq *psc = irq_data_get_irq_chip_data(data);
++	int ret;
++
++	ret = regmap_update_bits(psc->regmap, MT6363_PSC_IRQ_ENABLE,
++				 MT6363_PSC_KEY_BITS, psc->enabled);
++	/* Complete the boot-time RCS transaction after an IRQ is enabled. */
++	if (!ret && psc->enabled && !psc->armed)
++		ret = regmap_write(psc->regmap, MT6363_RCS_INT_DONE, 1);
++	if (!ret)
++		psc->armed = psc->enabled != 0;
++	if (ret)
++		dev_err_ratelimited(psc->dev, "Cannot sync PSC IRQ enables: %d\n", ret);
++	mutex_unlock(&psc->lock);
++}
++
++static void mt6363_psc_irq_mask(struct irq_data *data)
++{
++	struct mt6363_psc_irq *psc = irq_data_get_irq_chip_data(data);
++
++	psc->enabled &= ~BIT(data->hwirq - MT6363_PSC_IRQ_BASE);
++}
++
++static void mt6363_psc_irq_unmask(struct irq_data *data)
++{
++	struct mt6363_psc_irq *psc = irq_data_get_irq_chip_data(data);
++
++	psc->enabled |= BIT(data->hwirq - MT6363_PSC_IRQ_BASE);
++}
++
++static int mt6363_psc_irq_set_wake(struct irq_data *data, unsigned int on)
++{
++	struct mt6363_psc_irq *psc = irq_data_get_irq_chip_data(data);
++
++	return irq_set_irq_wake(psc->parent_irq, on);
++}
++
++static const struct irq_chip mt6363_psc_irq_chip = {
++	.name = "mt6363-psc",
++	.irq_mask = mt6363_psc_irq_mask,
++	.irq_unmask = mt6363_psc_irq_unmask,
++	.irq_bus_lock = mt6363_psc_bus_lock,
++	.irq_bus_sync_unlock = mt6363_psc_bus_sync_unlock,
++	.irq_set_wake = mt6363_psc_irq_set_wake,
++};
++
++static int mt6363_psc_irq_map(struct irq_domain *domain, unsigned int virq,
++			     irq_hw_number_t hwirq)
++{
++	if (hwirq < MT6363_PSC_IRQ_BASE ||
++	    hwirq >= MT6363_PSC_IRQ_BASE + MT6363_PSC_IRQ_COUNT ||
++	    !(MT6363_PSC_KEY_BITS & BIT(hwirq - MT6363_PSC_IRQ_BASE)))
++		return -EINVAL;
++
++	irq_set_chip_data(virq, domain->host_data);
++	irq_set_chip_and_handler(virq, &mt6363_psc_irq_chip, handle_simple_irq);
++	irq_set_nested_thread(virq, true);
++	irq_set_noprobe(virq);
++	return 0;
++}
++
++static const struct irq_domain_ops mt6363_psc_irq_ops = {
++	.map = mt6363_psc_irq_map,
++	.xlate = irq_domain_xlate_onecell,
++};
++
++static irqreturn_t mt6363_psc_irq_thread(int irq, void *data)
++{
++	struct mt6363_psc_irq *psc = data;
++	unsigned int summary, status, virq, bit;
++	unsigned long pending;
++	int ret;
++
++	ret = regmap_read(psc->regmap, MT6363_IRQ_SUMMARY, &summary);
++	if (ret)
++		goto err;
++	if (!(summary & MT6363_IRQ_SUMMARY_PSC))
++		goto complete;
++
++	ret = regmap_read(psc->regmap, MT6363_PSC_IRQ_STATUS, &status);
++	if (ret)
++		goto err;
++	pending = status & MT6363_PSC_KEY_BITS;
++	if (!pending)
++		goto complete;
++
++	for_each_set_bit(bit, &pending, MT6363_PSC_IRQ_COUNT) {
++		virq = irq_find_mapping(psc->domain, MT6363_PSC_IRQ_BASE + bit);
++		if (virq)
++			handle_nested_irq(virq);
++	}
++
++	ret = regmap_write(psc->regmap, MT6363_PSC_IRQ_STATUS, pending);
++	if (ret)
++		goto err;
++complete:
++	ret = regmap_write(psc->regmap, MT6363_RCS_INT_DONE, 1);
++	if (ret)
++		goto err;
++	return IRQ_HANDLED;
++
++err:
++	dev_err_ratelimited(psc->dev, "PSC IRQ register access failed: %d\n", ret);
++	return IRQ_NONE;
++}
++
++static void mt6363_psc_irq_remove(void *data)
++{
++	struct irq_domain *domain = data;
++	unsigned int hwirq, virq;
++
++	for (hwirq = MT6363_PSC_IRQ_BASE;
++	     hwirq < MT6363_PSC_IRQ_BASE + MT6363_PSC_IRQ_COUNT; hwirq++) {
++		virq = irq_find_mapping(domain, hwirq);
++		if (virq)
++			irq_dispose_mapping(virq);
++	}
++	irq_domain_remove(domain);
++}
++
++static int mt6363_psc_irq_init(struct device *dev, struct regmap *regmap)
++{
++	struct mt6363_psc_irq *psc;
++	int ret;
++
++	psc = devm_kzalloc(dev, sizeof(*psc), GFP_KERNEL);
++	if (!psc)
++		return -ENOMEM;
++
++	psc->dev = dev;
++	psc->regmap = regmap;
++	mutex_init(&psc->lock);
++	psc->parent_irq = of_irq_get(dev->of_node, 0);
++	if (psc->parent_irq <= 0)
++		return psc->parent_irq ?: -EINVAL;
++
++	/* Firmware leaves both unhandled MT6363 charger IRQs enabled. */
++	ret = regmap_clear_bits(regmap, MT6363_PSC_CHRDET_ENABLE, MT6363_PSC_CHRDET_BITS);
++	if (ret)
++		return ret;
++	ret = regmap_write(regmap, MT6363_PSC_CHRDET_STATUS, MT6363_PSC_CHRDET_BITS);
++	if (ret)
++		return ret;
++	ret = regmap_clear_bits(regmap, MT6363_PSC_IRQ_ENABLE, MT6363_PSC_KEY_BITS);
++	if (ret)
++		return ret;
++	ret = regmap_write(regmap, MT6363_PSC_IRQ_STATUS, MT6363_PSC_KEY_BITS);
++	if (ret)
++		return ret;
++	ret = regmap_write(regmap, MT6363_RCS_INT_DONE, 1);
++	if (ret)
++		return ret;
++
++	psc->domain = irq_domain_create_linear(dev_fwnode(dev),
++					       MT6363_PSC_IRQ_BASE + MT6363_PSC_IRQ_COUNT,
++					       &mt6363_psc_irq_ops, psc);
++	if (!psc->domain)
++		return -ENOMEM;
++	ret = devm_add_action_or_reset(dev, mt6363_psc_irq_remove, psc->domain);
++	if (ret)
++		return ret;
++
++	return devm_request_threaded_irq(dev, psc->parent_irq, NULL,
++					 mt6363_psc_irq_thread, IRQF_ONESHOT,
++					 "mt6363-psc", psc);
++}
++
++static int mt636x_rf_probe(struct spmi_device *sdev)
++{
++	struct device *dev = &sdev->dev;
++	const struct mt636x_rf_chip *chip = device_get_match_data(dev);
++	struct device_node *regulators __free(device_node) = NULL;
++	struct regulator_config config = { .dev = dev };
++	unsigned int chip_id, i;
++	int ret;
++
++	if (!chip)
++		return -ENODEV;
++
++	regulators = of_get_child_by_name(dev->of_node, "regulators");
++	if (!regulators)
++		return dev_err_probe(dev, -EINVAL, "Missing RF regulators\n");
++
++	config.regmap = devm_regmap_init_spmi_ext(sdev, &mt636x_regmap_config);
++	if (IS_ERR(config.regmap))
++		return dev_err_probe(dev, PTR_ERR(config.regmap), "Cannot create PMIC regmap\n");
++
++	ret = regmap_read(config.regmap, MT636X_SWCID, &chip_id);
++	if (ret || !chip_id)
++		return dev_err_probe(dev, ret ?: -ENODEV, "Cannot read PMIC chip ID\n");
++
++	for (i = 0; i < chip->count; i++) {
++		const struct regulator_desc *rail = &chip->rails[i];
++		struct device_node *node __free(device_node) =
++			of_get_child_by_name(regulators, rail->of_match);
++		struct regulator_dev *rdev;
++
++		if (!node || !of_device_is_available(node))
++			continue;
++
++		rdev = devm_regulator_register(dev, rail, &config);
++		if (IS_ERR(rdev))
++			return dev_err_probe(dev, PTR_ERR(rdev), "Cannot register %s\n", rail->name);
++	}
++
++	if (chip == &mt6363_rf && of_property_present(dev->of_node, "interrupts-extended")) {
++		ret = mt6363_psc_irq_init(dev, config.regmap);
++		if (ret)
++			return dev_err_probe(dev, ret, "Cannot initialize PSC IRQs\n");
++	}
++
++	/* Connectivity children use this parent's byte-addressed PMIC regmap. */
++	return devm_of_platform_populate(dev);
++}
++
++static const struct of_device_id mt636x_rf_of_match[] = {
++	{ .compatible = "mediatek,mt6363-rf-regulators", .data = &mt6363_rf },
++	{ .compatible = "mediatek,mt6369-rf-regulators", .data = &mt6369_rf },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mt636x_rf_of_match);
++
++static struct spmi_driver mt636x_rf_driver = {
++	.probe = mt636x_rf_probe,
++	.driver = {
++		.name = "mt636x-rf-regulator",
++		.of_match_table = mt636x_rf_of_match,
++	},
++};
++module_spmi_driver(mt636x_rf_driver);
++
++MODULE_DESCRIPTION("MediaTek MT6363 and MT6369 RF regulator driver");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/spmi/spmi-mtk-pmif.c b/drivers/spmi/spmi-mtk-pmif.c
+index 1048420b5..f73dc9b33 100644
+--- a/drivers/spmi/spmi-mtk-pmif.c
++++ b/drivers/spmi/spmi-mtk-pmif.c
+@@ -15,7 +15,6 @@
+ #include <linux/platform_device.h>
+ #include <linux/property.h>
+ #include <linux/spmi.h>
+-#include <linux/irqchip/chained_irq.h>
+ 
+ #define SWINF_IDLE	0x00
+ #define SWINF_WFVLDCLR	0x06
+@@ -52,6 +51,7 @@ struct pmif_data {
+ 	u32	soc_chan;
+ 	u8	spmi_ver;
+ 	u32	num_spmi_buses;
++	bool	firmware_clocks;
+ };
+ 
+ struct pmif_bus {
+@@ -62,14 +62,12 @@ struct pmif_bus {
+ 	int irq;
+ 	struct clk_bulk_data clks[PMIF_MAX_CLKS];
+ 	size_t nclks;
+-	u8 irq_min_sid;
+-	u8 irq_max_sid;
+-	u16 irq_en;
++	unsigned long irq_en;
+ 	raw_spinlock_t	lock;
+ };
+ 
+ struct pmif {
+-	struct pmif_bus bus[PMIF_MAX_BUSES];
++	struct pmif_bus *bus[PMIF_MAX_BUSES];
+ 	struct ch_reg	chan;
+ 	const struct pmif_data *data;
+ };
+@@ -471,60 +469,33 @@ static int pmif_spmi_write_cmd(struct spmi_controller *ctrl, u8 opc, u8 sid,
+ 	return 0;
+ }
+ 
+-static void mtk_spmi_handle_chained_irq(struct irq_desc *desc)
++static irqreturn_t mtk_spmi_rcs_thread(int irq, void *data)
+ {
+-	struct pmif_bus *pbus = irq_desc_get_handler_data(desc);
+-	struct irq_chip *chip = irq_desc_get_chip(desc);
++	struct pmif_bus *pbus = data;
+ 	struct pmif *arb = to_mtk_pmif(pbus->ctrl);
+-	u8 regidx_min, regidx_max;
+-	bool irq_handled = false;
+-	unsigned int i;
+-
+-	regidx_min = pbus->irq_min_sid / 4;
+-	regidx_min += SPMI_SLV_3_0_EINT;
+-
+-	regidx_max = pbus->irq_max_sid / 4;
+-	regidx_max += SPMI_SLV_3_0_EINT;
++	irqreturn_t ret = IRQ_NONE;
++	unsigned int reg;
+ 
+-	chained_irq_enter(chip, desc);
++	for (reg = SPMI_SLV_3_0_EINT; reg <= SPMI_SLV_F_C_EINT; reg++) {
++		u32 pending = mtk_spmi_readl(arb, pbus, reg);
+ 
+-	for (i = regidx_min; i <= regidx_max; i++) {
+-		u32 val = mtk_spmi_readl(arb, pbus, i);
++		while (pending) {
++			unsigned int bank = __ffs(pending) / 8;
++			unsigned int sid = (reg - SPMI_SLV_3_0_EINT) * 4 + bank;
++			u32 mask = PMIF_RCS_IRQ_MASK << (bank * 8);
++			unsigned int virq = irq_find_mapping(pbus->dom, sid);
+ 
+-		while (val) {
+-			u8 bit = __ffs(val);
+-			u8 bank = bit / 7;
+-			u8 sid = ((i - SPMI_SLV_3_0_EINT) * 4) + bank;
+-
+-			val &= ~(PMIF_RCS_IRQ_MASK << (8 * bank));
+-
+-			/* Check if IRQs for this SID are enabled */
+-			if (!(pbus->irq_en & BIT(sid)))
+-				continue;
++			/* Clear the master byte before the child rearms RCS. */
++			mtk_spmi_writel(arb, pbus, mask, reg);
++			if (virq && test_bit(sid, &pbus->irq_en))
++				handle_nested_irq(virq);
+ 
+-			generic_handle_domain_irq_safe(pbus->dom, sid);
+-			irq_handled = true;
++			pending &= ~mask;
++			ret = IRQ_HANDLED;
+ 		}
+ 	}
+ 
+-	if (!irq_handled)
+-		handle_bad_irq(desc);
+-
+-	chained_irq_exit(chip, desc);
+-}
+-
+-static void mtk_spmi_rcs_irq_eoi(struct irq_data *d)
+-{
+-	struct pmif_bus *pbus = irq_data_get_irq_chip_data(d);
+-	struct pmif *arb = to_mtk_pmif(pbus->ctrl);
+-	irq_hw_number_t irq = irqd_to_hwirq(d);
+-	unsigned int reg, shift;
+-
+-	/* There are four interrupts (8 bits each) per register */
+-	reg = SPMI_SLV_3_0_EINT + d->hwirq / 4;
+-	shift = (irq % 4) * 8;
+-
+-	mtk_spmi_writel(arb, pbus, PMIF_RCS_IRQ_MASK << shift, reg);
++	return ret;
+ }
+ 
+ static void mtk_spmi_rcs_irq_enable(struct irq_data *d)
+@@ -532,7 +503,7 @@ static void mtk_spmi_rcs_irq_enable(struct irq_data *d)
+ 	struct pmif_bus *pbus = irq_data_get_irq_chip_data(d);
+ 	irq_hw_number_t irq = irqd_to_hwirq(d);
+ 
+-	pbus->irq_en |= BIT(irq);
++	set_bit(irq, &pbus->irq_en);
+ }
+ 
+ static void mtk_spmi_rcs_irq_disable(struct irq_data *d)
+@@ -540,7 +511,7 @@ static void mtk_spmi_rcs_irq_disable(struct irq_data *d)
+ 	struct pmif_bus *pbus = irq_data_get_irq_chip_data(d);
+ 	irq_hw_number_t irq = irqd_to_hwirq(d);
+ 
+-	pbus->irq_en &= ~BIT(irq);
++	clear_bit(irq, &pbus->irq_en);
+ }
+ 
+ static int mtk_spmi_rcs_irq_set_wake(struct irq_data *d, unsigned int on)
+@@ -552,7 +523,6 @@ static int mtk_spmi_rcs_irq_set_wake(struct irq_data *d, unsigned int on)
+ 
+ static const struct irq_chip mtk_spmi_rcs_irq_chip = {
+ 	.name			= "spmi_rcs",
+-	.irq_eoi		= mtk_spmi_rcs_irq_eoi,
+ 	.irq_enable		= mtk_spmi_rcs_irq_enable,
+ 	.irq_disable		= mtk_spmi_rcs_irq_disable,
+ 	.irq_set_wake		= mtk_spmi_rcs_irq_set_wake,
+@@ -565,7 +535,8 @@ static int mtk_spmi_rcs_irq_translate(struct irq_domain *d, struct irq_fwspec *f
+ 	struct device *dev = &pbus->ctrl->dev;
+ 	u32 *intspec = fwspec->param;
+ 
+-	if (intspec[0] > SPMI_MAX_SLAVE_ID)
++	if ((fwspec->param_count != 1 && fwspec->param_count != 3) ||
++	    intspec[0] > SPMI_MAX_SLAVE_ID)
+ 		return -EINVAL;
+ 
+ 	/*
+@@ -576,13 +547,8 @@ static int mtk_spmi_rcs_irq_translate(struct irq_domain *d, struct irq_fwspec *f
+ 	 * hence that must be read from the SPMI device's registers.
+ 	 */
+ 	*out_hwirq = intspec[0];
+-	*out_type = intspec[2] & IRQ_TYPE_SENSE_MASK;
+-
+-	if (pbus->irq_min_sid > intspec[0])
+-		pbus->irq_min_sid = intspec[0];
+-
+-	if (pbus->irq_max_sid < intspec[0])
+-		pbus->irq_max_sid = intspec[0];
++	*out_type = fwspec->param_count == 3 ?
++		    intspec[2] & IRQ_TYPE_SENSE_MASK : IRQ_TYPE_NONE;
+ 
+ 	dev_dbg(dev, "Found SPMI IRQ %u (map: 0x%lx)\n", intspec[0], *out_hwirq);
+ 
+@@ -609,10 +575,11 @@ static int mtk_spmi_rcs_irq_alloc(struct irq_domain *d, unsigned int virq,
+ 		dev_dbg(dev, "Mapping IRQ%u (hwirq %lu) with type %u\n",
+ 			virq, hwirq, irqtype);
+ 
+-		irq_set_lockdep_class(virq, &mtk_spmi_rcs_irqlock_class,
++		irq_set_lockdep_class(virq + i, &mtk_spmi_rcs_irqlock_class,
+ 				      &mtk_spmi_rcs_irqreq_class);
+-		irq_domain_set_info(d, virq, hwirq, &mtk_spmi_rcs_irq_chip,
+-				    pbus, handle_level_irq, NULL, NULL);
++		irq_domain_set_info(d, virq + i, hwirq + i, &mtk_spmi_rcs_irq_chip,
++				    pbus, handle_simple_irq, NULL, NULL);
++		irq_set_nested_thread(virq + i, true);
+ 	}
+ 
+ 	return 0;
+@@ -630,6 +597,15 @@ static const struct pmif_data mt6873_pmif_arb = {
+ 	.soc_chan = 2,
+ };
+ 
++/* MT6878 uses RCS interrupts and boots with its PMIF clocks configured. */
++static const struct pmif_data mt6878_pmif_arb = {
++	.regs = mt8195_regs,
++	.spmimst_regs = mt8195_spmi_regs,
++	.soc_chan = 2,
++	.spmi_ver = 2,
++	.firmware_clocks = true,
++};
++
+ static const struct pmif_data mt8195_pmif_arb = {
+ 	.regs = mt8195_regs,
+ 	.spmimst_regs = mt8195_spmi_regs,
+@@ -650,6 +626,7 @@ static int mtk_spmi_irq_init(struct device_node *node,
+ {
+ 	struct pmif *arb = to_mtk_pmif(pbus->ctrl);
+ 	unsigned int i;
++	int ret;
+ 
+ 	/* No interrupts required for SPMI 1.x controller */
+ 	if (pdata->spmi_ver < 2) {
+@@ -670,7 +647,11 @@ static int mtk_spmi_irq_init(struct device_node *node,
+ 	for (i = SPMI_SLV_3_0_EINT; i <= SPMI_SLV_F_C_EINT; i++)
+ 		mtk_spmi_writel(arb, pbus, GENMASK(31, 0), i);
+ 
+-	return 0;
++	ret = request_threaded_irq(pbus->irq, NULL, mtk_spmi_rcs_thread,
++				   IRQF_ONESHOT, "spmi-rcs", pbus);
++	if (ret)
++		irq_domain_remove(pbus->dom);
++	return ret;
+ }
+ 
+ static void mtk_spmi_irq_remove(struct pmif_bus *pbus)
+@@ -678,16 +659,17 @@ static void mtk_spmi_irq_remove(struct pmif_bus *pbus)
+ 	if (!pbus->dom)
+ 		return;
+ 
+-	irq_set_chained_handler_and_data(pbus->irq, NULL, NULL);
++	free_irq(pbus->irq, pbus);
+ 	irq_domain_remove(pbus->dom);
+ }
+ 
+ static int mtk_spmi_bus_probe(struct platform_device *pdev,
+ 			      struct device_node *node,
+ 			      const struct pmif_data *pdata,
+-			      struct pmif_bus *pbus)
++			      struct pmif_bus **bus)
+ {
+ 	struct spmi_controller *ctrl;
++	struct pmif_bus *pbus;
+ 	int err, idx, bus_id, i;
+ 
+ 	if (pdata->num_spmi_buses > 1)
+@@ -722,13 +704,17 @@ static int mtk_spmi_bus_probe(struct platform_device *pdev,
+ 	if (IS_ERR(pbus->spmimst_base))
+ 		return PTR_ERR(pbus->spmimst_base);
+ 
+-	pbus->nclks = ARRAY_SIZE(pmif_clock_names);
+-	for (i = 0; i < pbus->nclks; i++) {
+-		pbus->clks[i].id = pmif_clock_names[i];
+-		pbus->clks[i].clk = of_clk_get_by_name(node, pbus->clks[i].id);
+-		if (IS_ERR(pbus->clks[i].clk))
+-			return dev_err_probe(&pdev->dev, PTR_ERR(pbus->clks[i].clk),
+-					     "Failed to get clocks\n");
++	if (!pdata->firmware_clocks || of_property_present(node, "clocks")) {
++		for (i = 0; i < ARRAY_SIZE(pmif_clock_names); i++) {
++			pbus->clks[i].id = pmif_clock_names[i];
++			pbus->clks[i].clk = of_clk_get_by_name(node, pbus->clks[i].id);
++			if (IS_ERR(pbus->clks[i].clk)) {
++				err = dev_err_probe(&pdev->dev, PTR_ERR(pbus->clks[i].clk),
++						    "Failed to get clocks\n");
++				goto err_put_clks;
++			}
++			pbus->nclks++;
++		}
+ 	}
+ 
+ 	err = clk_bulk_prepare_enable(pbus->nclks, pbus->clks);
+@@ -755,8 +741,7 @@ static int mtk_spmi_bus_probe(struct platform_device *pdev,
+ 	if (err)
+ 		goto err_remove_irq;
+ 
+-	if (pbus->dom)
+-		irq_set_chained_handler_and_data(pbus->irq, mtk_spmi_handle_chained_irq, pbus);
++	*bus = pbus;
+ 
+ 	return 0;
+ 
+@@ -789,6 +774,13 @@ static int mtk_spmi_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, arb);
+ 
++	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
++	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
++	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
++	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
++	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
++	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
++
+ 	if (!arb->data->num_spmi_buses) {
+ 		ret = mtk_spmi_bus_probe(pdev, node, arb->data, &arb->bus[cur_bus]);
+ 		if (ret)
+@@ -806,12 +798,6 @@ static int mtk_spmi_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
+-	chan_offset = PMIF_CHAN_OFFSET * arb->data->soc_chan;
+-	arb->chan.ch_sta = PMIF_SWINF_0_STA + chan_offset;
+-	arb->chan.wdata = PMIF_SWINF_0_WDATA_31_0 + chan_offset;
+-	arb->chan.rdata = PMIF_SWINF_0_RDATA_31_0 + chan_offset;
+-	arb->chan.ch_send = PMIF_SWINF_0_ACC + chan_offset;
+-	arb->chan.ch_rdy = PMIF_SWINF_0_VLD_CLR + chan_offset;
+ 
+ 	return 0;
+ }
+@@ -822,13 +808,13 @@ static void mtk_spmi_remove(struct platform_device *pdev)
+ 	int i;
+ 
+ 	for (i = 0; i < PMIF_MAX_BUSES; i++) {
+-		struct pmif_bus *pbus = &arb->bus[i];
++		struct pmif_bus *pbus = arb->bus[i];
+ 
+-		if (!pbus->ctrl)
++		if (!pbus)
+ 			continue;
+ 
+-		mtk_spmi_irq_remove(pbus);
+ 		spmi_controller_remove(pbus->ctrl);
++		mtk_spmi_irq_remove(pbus);
+ 		clk_bulk_disable_unprepare(pbus->nclks, pbus->clks);
+ 		clk_bulk_put(pbus->nclks, pbus->clks);
+ 	}
+@@ -838,6 +824,9 @@ static const struct of_device_id mtk_spmi_match_table[] = {
+ 	{
+ 		.compatible = "mediatek,mt6873-spmi",
+ 		.data = &mt6873_pmif_arb,
++	}, {
++		.compatible = "mediatek,mt6878-spmi",
++		.data = &mt6878_pmif_arb,
+ 	}, {
+ 		.compatible = "mediatek,mt8195-spmi",
+ 		.data = &mt8195_pmif_arb,
+-- 
+2.53.0
+

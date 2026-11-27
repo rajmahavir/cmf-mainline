@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+&{/soc@0} {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
+	cmf_dpmaif: dpmaif@10014000 {
+		compatible = "mediatek,mt6878-dpmaif";
+		reg = <0x10014000 0x1000>, <0x1022d000 0x1000>,
+		      <0x1022c000 0x1000>, <0x1022e000 0x1000>;
+		reg-names = "ao", "pd", "md-misc", "sram";
+		interrupt-parent = <&cmf_gic>;
+		interrupts = <0 238 4 0>, <0 259 4 0>;
+		clocks = <&cmf_infra_ao 6>, <&cmf_infra_ao 7>, <&cmf_infra_ao 8>;
+		clock-names = "main", "blk", "26m";
+		mediatek,infracfg-ao = <&cmf_infra_ao>;
+	};
+};
+
+&{/soc@0/mddriver@d180000} {
+	mediatek,dpmaif = <&cmf_dpmaif>;
+};

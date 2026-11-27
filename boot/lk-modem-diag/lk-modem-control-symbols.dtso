@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/dts-v1/;
+/plugin/;
+
+// Reference existing nodes without changing their phandles.
+&{/__symbols__} {
+    cmf_infra_ao = "/soc@0/syscon@10001000";
+    cmf_gic = "/soc@0/interrupt-controller@c000000";
+};

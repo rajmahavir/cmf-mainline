@@ -1,0 +1,18 @@
+#!/bin/sh
+# Make sure the cellular NetworkManager profile exists, then bring it up once
+# ModemManager has registered the modem. Settings: /etc/default/cmf-modem.
+set -eu
+CMF_DATA_APN=jionet CMF_NM_PROFILE="CMF Cellular" CMF_NM_DNS6=""
+[ -r /etc/default/cmf-modem ] && . /etc/default/cmf-modem
+p=$CMF_NM_PROFILE
+if ! nmcli -g connection.id connection show "$p" >/dev/null 2>&1; then
+	nmcli connection add type gsm ifname wwan0at0 con-name "$p" \
+		connection.autoconnect yes gsm.apn "$CMF_DATA_APN" gsm.auto-config no \
+		ipv4.method disabled ipv6.method auto ipv6.route-metric 31000
+	[ -z "$CMF_NM_DNS6" ] || nmcli connection modify "$p" ipv6.dns "$CMF_NM_DNS6"
+fi
+for i in $(seq 1 60); do
+	mmcli -L 2>/dev/null | grep -q Modem/ && break
+	sleep 2
+done
+nmcli --wait 45 connection up "$p" || echo "cmf-cellular: connection up failed; NetworkManager will retry"

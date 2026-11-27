@@ -1,0 +1,25 @@
+# CMF: keep the USB serial root shell when boot falls into emergency/rescue mode.
+# serial-getty@ttyGS0 is stopped on those targets, which left a keyboardless
+# phone with no way in (27 Nov 2026). Same autologin as serial-getty@ttyGS0.
+[Unit]
+Description=CMF root shell on USB serial (emergency/rescue)
+DefaultDependencies=no
+After=dev-ttyGS0.device systemd-user-sessions.service
+Conflicts=serial-getty@ttyGS0.service shutdown.target
+Before=shutdown.target
+ConditionPathExists=/dev/ttyGS0
+
+[Service]
+ExecStart=-/sbin/agetty --autologin root --noclear --keep-baud 115200,57600,38400,9600 ttyGS0 vt220
+Restart=always
+RestartSec=1
+UtmpIdentifier=ttyGS0
+TTYPath=/dev/ttyGS0
+TTYReset=yes
+TTYVHangup=yes
+KillMode=process
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+
+[Install]
+WantedBy=emergency.target rescue.target

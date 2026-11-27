@@ -1,0 +1,189 @@
+#!/bin/sh
+# Native boot (systemd PID 1): power up the MT6878 modem over the built-in
+# mtk_ccci driver. Native port of the earlier probe-ims script plus the
+# SIM-slot select and the t2-modemd IMS/data provisioning from data-ims.sh,
+# then hands the modem to ModemManager (/opt build). Same checks as the chroot
+# path. Runs as cmf-modem.service (Type=notify) and stays alive while the
+# CCCI filesystem and RPC helpers serve the modem.
+set -eu
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+bb=/usr/bin/busybox
+T=/usr/local/lib/cmf-modem
+[ -r /etc/default/cmf-modem ] && . /etc/default/cmf-modem
+: "${CMF_DATA_APN:=jionet}" "${CMF_DATA_APN_LABEL:=JioNet}" "${CMF_IMS_APN:=ims}" "${CMF_IP_TYPE:=IPV4V6}"
+tools=/usr/local/lib/cmf-modem
+ram=/run/cmf-modem
+fsm=/sys/kernel/debug/d180000.mddriver/fsm
+log() { echo "cmf-modem: $*"; echo "cmf-modem: $*" > /dev/kmsg 2>/dev/null || :; }
+
+[ "$(readlink /proc/1/exe)" = /usr/lib/systemd/systemd ] || { log "not native boot (PID 1 is not systemd); refusing"; exit 1; }
+grep -q ' /sys/kernel/debug debugfs ' /proc/mounts ||
+	mount -t debugfs -o mode=0700,nosuid,nodev,noexec debugfs /sys/kernel/debug
+provider=/proc/device-tree/soc@0/spmi@1cc04000/pmic@4/modem-resources
+[ "$(tr -d '\000' < "$provider/compatible")" = cmf,mt6878-switchable-modem-resources ]
+[ -d /sys/module/mtk_ccci ] || { log "mtk_ccci not built in"; exit 1; }
+[ "$(basename "$(readlink /sys/bus/platform/devices/d180000.mddriver/driver)")" = mtk-ccci-md ]
+
+# First start of each boot: LK hands over a powered modem ("lk-owned").
+state=$(head -1 "$fsm")
+case "$state" in
+'state: lk-owned')
+	test "$(grep -c '^\[ok\]' "$fsm")" -eq 8
+	exp_pwr=0x4200000D; vmodem='now 800000 uV'; vdigrf='now 700000 uV' ;;
+'state: stopped')
+	exp_pwr=0x02000009; vmodem='now 575000 uV'; vdigrf='now 650000 uV' ;;
+*) log "unexpected FSM $state"; exit 1 ;;
+esac
+log "FSM $state"
+[ "$($bb devmem 0x1c001e00 32)" = "$exp_pwr" ]
+grep -F '[ok]' "$fsm" | grep -F 'module parameter power_ctrl=1' >/dev/null
+for r in 'MD power domain attached' 'topckgen regmap' 'CCIF reset' 'CCISM_MCU shared memory' \
+	 "md-vmodem-supply ($vmodem, 800000 uV at start)" 'md-vsram-supply (now 800000' \
+	 "md-vdigrf-supply ($vdigrf, 700000 uV at start)"; do
+	grep -F '[ok]' "$fsm" | grep -F "$r" >/dev/null || { log "resource check failed: $r"; exit 1; }
+done
+
+# Calibration, NV and modem image copies in RAM (block partitions read-only).
+umask 077
+grep -q " $ram tmpfs " /proc/mounts || { mkdir -p "$ram"; mount -t tmpfs -o mode=0711,size=448m,nosuid,nodev tmpfs "$ram"; }
+mkdir -p "$ram/mount" "$ram/fs/ro"
+for map in sdc7:nvdata:nvdata sdc6:nvcfg:nvcfg sdc17:protect1:protect_f sdc18:protect2:protect_s; do
+	disk=${map%%:*}; rest=${map#*:}; label=${rest%%:*}; dir=${rest#*:}
+	grep -qx "PARTNAME=$label" "/sys/class/block/$disk/uevent"
+	[ -d "$ram/fs/ro/$dir" ] && continue
+	mount -t ext4 -o ro,noload,nodev,nosuid,noexec "/dev/$disk" "$ram/mount"
+	mkdir "$ram/fs/ro/$dir"; cp -a "$ram/mount/." "$ram/fs/ro/$dir/"
+	umount "$ram/mount"
+done
+grep -qx PARTNAME=modem_a /sys/class/block/sdc22/uevent
+[ -s "$ram/modem.img" ] || dd if=/dev/sdc22 of="$ram/modem.img" bs=1048576 status=none
+test -d "$ram/fs/ro/nvdata/md_cmn" && test -d "$ram/fs/ro/nvdata/md"
+chown -hR 0:62001 "$ram/fs/ro"; chmod -R g+rX,g-w,o-rwx "$ram/fs/ro"; chown 62001:62001 "$ram/fs"
+chown 0:62002 "$ram/modem.img"; chmod 0440 "$ram/modem.img"
+
+for n in fs rpc; do
+	if [ "$n" = fs ]; then uid=62001; b=fsd; else uid=62002; b=rpcd; fi
+	install -m 0755 "$tools/t2-ccci-$b" "$ram/$b"
+	num=$(cat "/sys/class/misc/ccci_$n/dev")
+	node=/dev/cmf-hs2-$n
+	rm -f "$node"; mknod "$node" c "${num%:*}" "${num#*:}"
+	chown "$uid:$uid" "$node"; chmod 0600 "$node"
+done
+setpriv --reuid=62001 --regid=62001 --clear-groups --no-new-privs "$ram/fsd" -r "$ram/fs" -d /dev/cmf-hs2-fs >"$ram/fs.log" 2>&1 &
+fspid=$!
+setpriv --reuid=62002 --regid=62002 --clear-groups --no-new-privs "$ram/rpcd" -L -m "$ram/modem.img" -d /dev/cmf-hs2-rpc >"$ram/rpc.log" 2>&1 &
+rpcpid=$!
+sleep 2
+kill -0 "$fspid" && kill -0 "$rpcpid" || { cat "$ram/fs.log" "$ram/rpc.log"; exit 1; }
+grep -q 'START port=' "$ram/fs/journal.log"
+grep -q 'serving /dev/cmf-hs2-rpc' "$ram/rpc.log"
+! grep -q 'DRDI not prepared' "$ram/rpc.log" || { cat "$ram/rpc.log"; exit 1; }
+log "FS and RPC serving; DRDI mapped"
+
+# Allow the single internal root mapping. Every other non-SD block
+# mount fails the guard before the modem start request.
+rootdev=$(awk '$5 == "/" { print $3; exit }' /proc/self/mountinfo)
+case "$rootdev" in
+    252:*) ;;
+    *) log "unexpected root block device $rootdev"; exit 1 ;;
+esac
+[ "$(cat "/sys/dev/block/$rootdev/dm/name")" = cmf-root ]
+awk -v root="$rootdev" '
+    $3 ~ /^0:/ || $3 ~ /^179:/ { next }
+    $3 == root && $5 == "/" { next }
+    { print; bad=1 }
+    END { exit bad }
+' /proc/self/mountinfo
+
+freeze_watchdog=
+root_frozen=no
+watchdog_receipt=$ram/ufs-freeze-watchdog
+freeze_cleanup() {
+    if [ "$root_frozen" = yes ]; then
+        if ! fsfreeze -u /; then
+            [ -s "$watchdog_receipt" ] || return 1
+        fi
+        root_frozen=no
+    fi
+    if [ -n "$freeze_watchdog" ]; then
+        kill "$freeze_watchdog" 2>/dev/null || :
+        wait "$freeze_watchdog" 2>/dev/null || :
+        freeze_watchdog=
+    fi
+}
+trap 'freeze_cleanup' EXIT
+trap 'exit 1' HUP INT TERM
+rm -f "$watchdog_receipt"
+sync
+echo dry-run > "$fsm"
+freeze_marker="cmf-modem: UFS freeze window $$"
+printf '<6>%s begin\n' "$freeze_marker" > /dev/kmsg
+root_frozen=yes
+fsfreeze -f /
+(
+    sleep 30
+    # Record a watchdog attempt in tmpfs before thaw so either
+    # process can observe a concurrent unfreeze.
+    printf 'watchdog timeout\n' > "$watchdog_receipt"
+    fsfreeze -u / >> "$watchdog_receipt" 2>&1
+) &
+freeze_watchdog=$!
+rc=0; echo start > "$fsm" || rc=$?
+state=$(head -1 "$fsm")
+freeze_cleanup
+trap - EXIT HUP INT TERM
+printf '<6>%s end\n' "$freeze_marker" > /dev/kmsg
+dmesg | awk -v marker="$freeze_marker" '
+    index($0, marker " begin") { inside=1; next }
+    index($0, marker " end") { inside=0 }
+    inside && tolower($0) ~ /ufs/ { print }
+' > "$ram/ufs-freeze-kmsg"
+grep -Ei 'ufs|unknown.*(rpc|id|op)|unsupported.*(rpc|id|op)' "$ram/rpc.log" \
+    > "$ram/ufs-freeze-rpc" || :
+log "UFS freeze receipts: $(wc -l < "$ram/ufs-freeze-kmsg") kernel lines, $(wc -l < "$ram/ufs-freeze-rpc") RPC lines"
+if [ -s "$watchdog_receipt" ]; then
+    log "UFS freeze watchdog fired"
+    exit 1
+fi
+log "start write $rc, $state"
+[ "$rc" -eq 0 ] && [ "$state" = 'state: ready' ] || { dmesg | grep -Ei 'mtk_ccci|ccci:|modem exception' | tail -30; exit 1; }
+
+# SIM slot 1 and IMS/data provisioning with t2-modemd (the proven path),
+# then release the AT port to ModemManager.
+i=0; while [ ! -c /dev/wwan0at0 ] && [ "$i" -lt 20 ]; do sleep 1; i=$((i + 1)); done
+python3 - <<'PY'
+import os, select, time
+fd = os.open('/dev/wwan0at0', os.O_RDWR | os.O_NONBLOCK)
+def cmd(c, t=8):
+    os.write(fd, (c + '\r').encode()); end = time.monotonic() + t; buf = b''
+    while time.monotonic() < end:
+        if not select.select([fd], [], [], max(0, end - time.monotonic()))[0]: break
+        buf += os.read(fd, 16384)
+        for line in buf.decode(errors='replace').splitlines():
+            line = line.strip()
+            if line in ('OK', 'ERROR') or line.startswith('+CME ERROR:'): return line
+    raise TimeoutError(c)
+print('AT', cmd('AT')); cmd('AT+CMEE=2')
+r = cmd('AT+ESUO=4'); print('slot 1 select', r); assert r == 'OK'
+os.close(fd)
+PY
+if [ "${CMF_MODEM_T2_PROVISION:-1}" = 1 ]; then
+	M=$ram/t2-modemd; install -m 0755 "$T/t2-modemd" "$M"; sock=$ram/t2.sock
+	"$M" -s "$sock" -S none -a -o ims=1 -o data_apn="$CMF_DATA_APN" -o data_ip_type="$CMF_IP_TYPE" -o ims_apn="$CMF_IMS_APN" \
+		-o mms_apn= -o sos_apn= -o apn_profiles=1 -o radio_on_at_start=1 -o manage_resolv=0 \
+		-o route_metric=31000 -d /dev/wwan0at0 >"$ram/t2-modemd.log" 2>&1 &
+	t2=$!
+	sleep 20
+	for i in $(seq 1 20); do "$M" -s "$sock" status 2>/dev/null | grep -qi 'mipc.*ready' && break; sleep 1; done
+	if timeout 65 "$M" -s "$sock" data up "$CMF_DATA_APN_LABEL" >"$ram/t2-data-up.log" 2>&1; then
+		log "t2-modemd: IMS/data provisioned ($("$M" -s "$sock" data status | awk '/^data link:/{print $3}'))"
+	else
+		log "t2-modemd: data up failed (continuing to ModemManager)"
+	fi
+	timeout 14 "$M" -s "$sock" data down >/dev/null 2>&1 || :
+	kill -TERM "$t2" 2>/dev/null || :; wait "$t2" 2>/dev/null || :
+fi
+
+systemd-notify --ready --status="modem ready; CCCI fs/rpc serving"
+log "modem ready; handing over to ModemManager"
+wait "$fspid" "$rpcpid"

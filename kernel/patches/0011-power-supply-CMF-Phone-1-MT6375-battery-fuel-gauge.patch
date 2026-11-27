@@ -1,0 +1,568 @@
+From 4ef3262de6309506ebb77d924de8c91351173ea1 Mon Sep 17 00:00:00 2001
+From: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 07:12:10 +0000
+Subject: [PATCH 11/13] power: supply: CMF Phone 1 MT6375 battery fuel gauge
+
+CMF Phone 1 (MT6878) mainline port, Stage 95c. Rebased onto MT6878-Mainline/linux 12f2e9f04.
+
+Signed-off-by: CMF Mainline Port <cmf-mainline@users.noreply.github.com>
+---
+ drivers/power/supply/Kconfig              |   8 +
+ drivers/power/supply/Makefile             |   1 +
+ drivers/power/supply/cmf-battery-curve.h  | 108 ++++++
+ drivers/power/supply/cmf-mt6375-battery.c | 402 ++++++++++++++++++++++
+ 4 files changed, 519 insertions(+)
+ create mode 100644 drivers/power/supply/cmf-battery-curve.h
+ create mode 100644 drivers/power/supply/cmf-mt6375-battery.c
+
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+index f0ede1cec..12d5e5748 100644
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -1186,4 +1186,12 @@ config MACSMC_POWER
+ 
+ 	  Say Y or M here if you have an Apple Silicon based Mac.
+ 
++config BATTERY_CMF_MT6375
++	tristate "CMF Phone 1 MT6375 battery telemetry"
++	depends on I2C
++	depends on ARCH_MEDIATEK || COMPILE_TEST
++	help
++	  Battery and USB input telemetry for the CMF Phone 1 from the
++	  MT6375 PMU and fuel gauge on I2C bus 5, with estimated capacity.
++
+ endif # POWER_SUPPLY
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+index 31fe4a145..0cddc899a 100644
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -133,3 +133,4 @@ obj-$(CONFIG_CHARGER_QCOM_SMB2)	+= qcom_smbx.o
+ obj-$(CONFIG_FUEL_GAUGE_MM8013)	+= mm8013.o
+ obj-$(CONFIG_MACSMC_POWER)	+= macsmc-power.o
+ obj-$(CONFIG_CHARGER_MAX77759)	+= max77759_charger.o
++obj-$(CONFIG_BATTERY_CMF_MT6375)	+= cmf-mt6375-battery.o
+diff --git a/drivers/power/supply/cmf-battery-curve.h b/drivers/power/supply/cmf-battery-curve.h
+new file mode 100644
+index 000000000..d877f6fe1
+--- /dev/null
++++ b/drivers/power/supply/cmf-battery-curve.h
+@@ -0,0 +1,108 @@
++/* Generated from the stock CMF battery0-profile-t1 (25 C). */
++static const struct { int discharged, voltage; } cmf_curve[] = {
++	{ 0, 44794 },
++	{ 500, 44645 },
++	{ 1000, 44534 },
++	{ 1500, 44435 },
++	{ 2000, 44345 },
++	{ 2500, 44255 },
++	{ 3000, 44165 },
++	{ 3500, 44075 },
++	{ 4000, 43982 },
++	{ 4500, 43886 },
++	{ 5000, 43790 },
++	{ 5500, 43687 },
++	{ 6000, 43582 },
++	{ 6500, 43477 },
++	{ 7000, 43368 },
++	{ 7500, 43257 },
++	{ 8000, 43142 },
++	{ 8500, 43027 },
++	{ 9000, 42903 },
++	{ 9500, 42785 },
++	{ 10000, 42658 },
++	{ 10500, 42537 },
++	{ 11000, 42413 },
++	{ 11500, 42289 },
++	{ 12000, 42165 },
++	{ 12500, 42038 },
++	{ 13000, 41917 },
++	{ 13500, 41793 },
++	{ 14000, 41675 },
++	{ 14500, 41555 },
++	{ 15000, 41437 },
++	{ 15500, 41319 },
++	{ 16000, 41204 },
++	{ 16500, 41093 },
++	{ 17000, 40981 },
++	{ 17500, 40869 },
++	{ 18000, 40761 },
++	{ 18500, 40656 },
++	{ 19000, 40550 },
++	{ 19500, 40448 },
++	{ 20000, 40349 },
++	{ 20500, 40249 },
++	{ 21000, 40147 },
++	{ 21500, 40048 },
++	{ 22000, 39930 },
++	{ 22500, 39787 },
++	{ 23000, 39608 },
++	{ 23500, 39459 },
++	{ 24000, 39344 },
++	{ 24500, 39251 },
++	{ 25000, 39167 },
++	{ 25500, 39090 },
++	{ 26000, 39015 },
++	{ 26500, 38950 },
++	{ 27000, 38882 },
++	{ 27500, 38817 },
++	{ 28000, 38755 },
++	{ 28500, 38699 },
++	{ 29000, 38640 },
++	{ 29500, 38588 },
++	{ 30000, 38535 },
++	{ 30500, 38485 },
++	{ 31000, 38439 },
++	{ 31500, 38389 },
++	{ 32000, 38346 },
++	{ 32500, 38302 },
++	{ 33000, 38262 },
++	{ 33500, 38222 },
++	{ 34000, 38188 },
++	{ 34500, 38151 },
++	{ 35000, 38113 },
++	{ 35500, 38079 },
++	{ 36000, 38042 },
++	{ 36500, 38002 },
++	{ 37000, 37943 },
++	{ 37500, 37884 },
++	{ 38000, 37834 },
++	{ 38500, 37782 },
++	{ 39000, 37729 },
++	{ 39500, 37679 },
++	{ 40000, 37627 },
++	{ 40500, 37583 },
++	{ 41000, 37540 },
++	{ 41500, 37500 },
++	{ 42000, 37447 },
++	{ 42500, 37388 },
++	{ 43000, 37320 },
++	{ 43500, 37264 },
++	{ 44000, 37205 },
++	{ 44500, 37127 },
++	{ 45000, 37038 },
++	{ 45500, 37003 },
++	{ 46000, 36991 },
++	{ 46500, 36976 },
++	{ 47000, 36963 },
++	{ 47500, 36941 },
++	{ 48000, 36904 },
++	{ 48500, 36774 },
++	{ 49000, 36418 },
++	{ 49500, 35912 },
++	{ 50000, 35252 },
++	{ 50500, 34328 },
++	{ 51000, 32818 },
++	{ 51370, 30019 },
++	{ 51420, 29334 },
++};
+diff --git a/drivers/power/supply/cmf-mt6375-battery.c b/drivers/power/supply/cmf-mt6375-battery.c
+new file mode 100644
+index 000000000..bf56851e9
+--- /dev/null
++++ b/drivers/power/supply/cmf-mt6375-battery.c
+@@ -0,0 +1,402 @@
++// SPDX-License-Identifier: GPL-2.0-only
++#include <linux/delay.h>
++#include <linux/i2c.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/power_supply.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++
++#include "cmf-battery-curve.h"
++
++#define CMF_FULL_UAH 5000000
++#define FG_LATCH 0x70
++#define FG_LATCH_STATUS 0x6f
++#define FG_LATCH_READ BIT(0)
++#define FG_LATCH_CLEAR BIT(3)
++#define FG_LATCH_ACTIVE BIT(7)
++
++static struct i2c_client *pmu, *gauge;
++static struct power_supply *battery, *usb;
++static struct delayed_work poll;
++static DEFINE_MUTEX(sample_lock);
++
++struct cmf_sample {
++	int voltage_uv, current_ua, vbus_uv, capacity, charge_uah;
++	s32 counter;
++};
++
++static struct cmf_sample sample;
++static s32 initial_counter;
++static int initial_charge_uah;
++static bool sample_valid, seeded;
++
++static int read_reg(struct i2c_client *client, u8 reg, void *buf, u16 len)
++{
++	struct i2c_msg msg[] = {
++		{ .addr = client->addr, .len = 1, .buf = &reg },
++		{ .addr = client->addr, .flags = I2C_M_RD, .len = len, .buf = buf },
++	};
++	int ret = i2c_transfer(client->adapter, msg, ARRAY_SIZE(msg));
++
++	return ret == ARRAY_SIZE(msg) ? 0 : ret < 0 ? ret : -EIO;
++}
++
++static int read_byte(struct i2c_client *client, u8 reg)
++{
++	u8 value;
++	int ret = read_reg(client, reg, &value, 1);
++
++	return ret < 0 ? ret : value;
++}
++
++static int wait_mask(struct i2c_client *client, u8 reg, u8 mask, bool set)
++{
++	int i, ret;
++
++	for (i = 0; i < 25; i++) {
++		ret = read_byte(client, reg);
++		if (ret < 0)
++			return ret;
++		if (!!(ret & mask) == set)
++			return 0;
++		usleep_range(200, 500);
++	}
++	return -ETIMEDOUT;
++}
++
++static int read_adc(unsigned int channel, unsigned int scale, int *value)
++{
++	u8 data[2];
++	int ret;
++
++	ret = wait_mask(pmu, 0xa6, GENMASK(7, 4), false);
++	if (ret)
++		return ret;
++	ret = i2c_smbus_write_byte_data(pmu, 0xa6, channel << 4);
++	if (ret)
++		return ret;
++	usleep_range(4400, 6600);
++	ret = wait_mask(pmu, 0xa6, GENMASK(7, 4), false);
++	if (ret)
++		return ret;
++	ret = read_reg(pmu, 0xaa + (channel - 1) * 2, data, sizeof(data));
++	if (!ret)
++		*value = get_unaligned_be16(data) * scale;
++	return ret;
++}
++
++static int read_gauge(struct cmf_sample *next)
++{
++	u8 current_raw[2], counter[4];
++	int ctrl, ret, release, restore;
++	s32 current_counts;
++	u32 raw;
++
++	ctrl = read_byte(gauge, FG_LATCH);
++	if (ctrl < 0)
++		return ctrl;
++	if (ctrl & (FG_LATCH_READ | FG_LATCH_CLEAR))
++		return -EBUSY;
++
++	ret = i2c_smbus_write_byte_data(gauge, FG_LATCH, ctrl | FG_LATCH_READ);
++	if (!ret)
++		ret = wait_mask(gauge, FG_LATCH_STATUS, FG_LATCH_ACTIVE, true);
++	if (!ret)
++		ret = read_reg(gauge, 0xe7, current_raw, sizeof(current_raw));
++	if (!ret)
++		ret = read_reg(gauge, 0x78, counter, sizeof(counter));
++	release = i2c_smbus_write_byte_data(gauge, FG_LATCH, ctrl | FG_LATCH_CLEAR);
++	if (!release)
++		release = wait_mask(gauge, FG_LATCH_STATUS, FG_LATCH_ACTIVE, false);
++	restore = i2c_smbus_write_byte_data(gauge, FG_LATCH, ctrl);
++	if (restore || release || ret)
++		return restore ?: release ?: ret;
++
++	/* The gauge uses one's complement for negative readings. */
++	raw = get_unaligned_le16(current_raw);
++	current_counts = (raw & BIT(15)) ? (s32)raw - U16_MAX : raw;
++	next->current_ua = div_s64((s64)current_counts * 610352, 1000);
++	raw = get_unaligned_le32(counter);
++	next->counter = (raw & BIT(31)) ? (s32)(raw + 1) : raw;
++	return 0;
++}
++
++/* The stock battery0 profile at 25 C uses 100 uV and 100 uAh units. */
++static int estimate_initial_charge(const struct cmf_sample *next)
++{
++	int i, before, after, v_before, v_after;
++	/* Approximate the terminal-voltage drop using the profile's typical 50 mOhm. */
++	int ocv = (next->voltage_uv - next->current_ua / 20) / 100;
++
++	if (ocv >= cmf_curve[0].voltage)
++		return CMF_FULL_UAH;
++	for (i = 1; i < ARRAY_SIZE(cmf_curve); i++) {
++		v_before = cmf_curve[i - 1].voltage;
++		v_after = cmf_curve[i].voltage;
++		if (ocv < v_after || v_before <= v_after)
++			continue;
++		before = cmf_curve[i - 1].discharged;
++		after = cmf_curve[i].discharged;
++		return clamp(CMF_FULL_UAH - before * 100 -
++			     (ocv < v_before ? (v_before - ocv) * (after - before) *
++			      100 / (v_before - v_after) : 0), 0, CMF_FULL_UAH);
++	}
++	return 0;
++}
++
++static int collect(struct cmf_sample *next)
++{
++	s32 delta;
++	int ret;
++
++	ret = read_adc(4, 1250, &next->voltage_uv);
++	if (!ret)
++		ret = read_adc(11, 25000, &next->vbus_uv);
++	if (!ret)
++		ret = read_gauge(next);
++	if (ret)
++		return ret;
++	if (next->voltage_uv < 2500000 || next->voltage_uv > 4700000)
++		return -ERANGE;
++	if (!seeded) {
++		initial_charge_uah = estimate_initial_charge(next);
++		initial_counter = next->counter;
++		seeded = true;
++	}
++	delta = (s32)((u32)next->counter - (u32)initial_counter);
++	next->charge_uah = clamp(initial_charge_uah +
++				 (int)div_s64((s64)delta * 85, 1000), 0, CMF_FULL_UAH);
++	next->capacity = DIV_ROUND_CLOSEST(next->charge_uah, CMF_FULL_UAH / 100);
++	return 0;
++}
++
++static bool is_online(const struct cmf_sample *reading)
++{
++	return reading->vbus_uv >= 4000000;
++}
++
++static enum power_supply_property battery_props[] = {
++	POWER_SUPPLY_PROP_PRESENT, POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_VOLTAGE_NOW, POWER_SUPPLY_PROP_CURRENT_NOW,
++	POWER_SUPPLY_PROP_CAPACITY, POWER_SUPPLY_PROP_CHARGE_NOW,
++	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN, POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
++};
++
++static int battery_property(struct power_supply *psy,
++			    enum power_supply_property prop,
++			    union power_supply_propval *val)
++{
++	int ret = 0;
++
++	mutex_lock(&sample_lock);
++	if (!sample_valid) {
++		ret = -ENODATA;
++		goto done;
++	}
++	switch (prop) {
++	case POWER_SUPPLY_PROP_PRESENT:
++		val->intval = 1;
++		break;
++	case POWER_SUPPLY_PROP_STATUS:
++		if (!is_online(&sample) || sample.current_ua < -30000)
++			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
++		else if (sample.current_ua > 30000)
++			val->intval = POWER_SUPPLY_STATUS_CHARGING;
++		else
++			val->intval = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		val->intval = sample.voltage_uv;
++		break;
++	case POWER_SUPPLY_PROP_CURRENT_NOW:
++		val->intval = sample.current_ua;
++		break;
++	case POWER_SUPPLY_PROP_CAPACITY:
++		val->intval = sample.capacity;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_NOW:
++		val->intval = sample.charge_uah;
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
++		val->intval = CMF_FULL_UAH;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
++		val->intval = 3300000;
++		break;
++	default:
++		ret = -EINVAL;
++		break;
++	}
++done:
++	mutex_unlock(&sample_lock);
++	return ret;
++}
++
++static enum power_supply_property usb_props[] = { POWER_SUPPLY_PROP_ONLINE };
++
++static int usb_property(struct power_supply *psy, enum power_supply_property prop,
++			union power_supply_propval *val)
++{
++	int ret = 0;
++
++	if (prop != POWER_SUPPLY_PROP_ONLINE)
++		return -EINVAL;
++	mutex_lock(&sample_lock);
++	if (sample_valid)
++		val->intval = is_online(&sample);
++	else
++		ret = -ENODATA;
++	mutex_unlock(&sample_lock);
++	return ret;
++}
++
++static const struct power_supply_desc battery_desc = {
++	.name = "cmf-battery",
++	.type = POWER_SUPPLY_TYPE_BATTERY,
++	.properties = battery_props,
++	.num_properties = ARRAY_SIZE(battery_props),
++	.get_property = battery_property,
++};
++
++static const struct power_supply_desc usb_desc = {
++	.name = "cmf-usb-input",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.properties = usb_props,
++	.num_properties = ARRAY_SIZE(usb_props),
++	.get_property = usb_property,
++};
++
++static void poll_battery(struct work_struct *work)
++{
++	struct cmf_sample next;
++	int ret = collect(&next);
++
++	mutex_lock(&sample_lock);
++	sample_valid = !ret;
++	if (!ret)
++		sample = next;
++	mutex_unlock(&sample_lock);
++	power_supply_changed(battery);
++	power_supply_changed(usb);
++	schedule_delayed_work(&poll, msecs_to_jiffies(5000));
++}
++
++static int cmf_battery_try(void)
++{
++	struct i2c_adapter *adapter = i2c_get_adapter(5);
++	struct power_supply_config config = {};
++	struct device_node *charger_bus;
++	int ret;
++
++	if (!adapter)
++		return -ENODEV;
++	charger_bus = of_find_node_by_path("/soc@0/i2c@11280000");
++	if (!charger_bus || charger_bus != adapter->dev.of_node) {
++		of_node_put(charger_bus);
++		ret = -ENODEV;
++		goto put_adapter;
++	}
++	of_node_put(charger_bus);
++
++	pmu = i2c_new_dummy_device(adapter, 0x34);
++	if (IS_ERR(pmu)) {
++		ret = PTR_ERR(pmu);
++		goto put_adapter;
++	}
++	gauge = i2c_new_dummy_device(adapter, 0x1a);
++	if (IS_ERR(gauge)) {
++		ret = PTR_ERR(gauge);
++		goto remove_pmu;
++	}
++
++	ret = read_byte(pmu, 0x00);
++	if (ret < 0 || (ret & 0xf0) != 0x70) {
++		ret = ret < 0 ? ret : -ENODEV;
++		goto remove_gauge;
++	}
++	ret = read_byte(pmu, 0xa4);
++	if (ret < 0 || !(ret & BIT(7))) {
++		ret = ret < 0 ? ret : -ENODATA;
++		goto remove_gauge;
++	}
++	ret = collect(&sample);
++	if (ret)
++		goto remove_gauge;
++	sample_valid = true;
++
++	battery = power_supply_register(&pmu->dev, &battery_desc, &config);
++	if (IS_ERR(battery)) {
++		ret = PTR_ERR(battery);
++		goto remove_gauge;
++	}
++	usb = power_supply_register(&pmu->dev, &usb_desc, &config);
++	if (IS_ERR(usb)) {
++		ret = PTR_ERR(usb);
++		power_supply_unregister(battery);
++		goto remove_gauge;
++	}
++	INIT_DELAYED_WORK(&poll, poll_battery);
++	schedule_delayed_work(&poll, msecs_to_jiffies(5000));
++	i2c_put_adapter(adapter);
++	return 0;
++
++remove_gauge:
++	i2c_unregister_device(gauge);
++remove_pmu:
++	i2c_unregister_device(pmu);
++put_adapter:
++	i2c_put_adapter(adapter);
++	return ret;
++}
++
++/*
++ * Built in, init can run before I2C adapter 5 (i2c@11280000) has probed.
++ * Retry every 500 ms for up to 60 s while the bus or chip is missing.
++ */
++static struct delayed_work cmf_battery_work;
++static unsigned int cmf_battery_tries;
++static bool cmf_battery_done;
++
++static void cmf_battery_retry(struct work_struct *work)
++{
++	int ret = cmf_battery_try();
++
++	if (!ret) {
++		cmf_battery_done = true;
++		pr_info("cmf-battery: registered after %u attempt(s)\n",
++			cmf_battery_tries + 1);
++		return;
++	}
++	if (ret == -ENODEV && ++cmf_battery_tries < 120) {
++		schedule_delayed_work(&cmf_battery_work, msecs_to_jiffies(500));
++		return;
++	}
++	pr_err("cmf-battery: giving up: %d\n", ret);
++}
++
++static int __init cmf_battery_init(void)
++{
++	INIT_DELAYED_WORK(&cmf_battery_work, cmf_battery_retry);
++	schedule_delayed_work(&cmf_battery_work, 0);
++	return 0;
++}
++
++static void __exit cmf_battery_exit(void)
++{
++	cancel_delayed_work_sync(&cmf_battery_work);
++	if (!cmf_battery_done)
++		return;
++	cancel_delayed_work_sync(&poll);
++	power_supply_unregister(usb);
++	power_supply_unregister(battery);
++	i2c_unregister_device(gauge);
++	i2c_unregister_device(pmu);
++}
++module_init(cmf_battery_init);
++module_exit(cmf_battery_exit);
++MODULE_LICENSE("GPL");
++MODULE_DESCRIPTION("CMF Phone 1 MT6375 battery telemetry with estimated capacity");
++
+-- 
+2.53.0
+

@@ -1,0 +1,14 @@
+[Unit]
+Description=CMF Phone 1 Bluetooth HCI bridge (stpbt to hci_vhci)
+After=cmf-wifi-calibrate.service bluetooth.service
+Wants=bluetooth.service
+ConditionPathExists=/opt/cmf-bluetooth/cmf-bluetooth-start.sh
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 30); do [ -c /dev/stpbt ] && exit 0; sleep 1; done; exit 1'
+ExecStart=/opt/cmf-bluetooth/cmf-bluetooth-start.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

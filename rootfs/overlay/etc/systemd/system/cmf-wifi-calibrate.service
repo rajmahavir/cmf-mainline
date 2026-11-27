@@ -1,0 +1,19 @@
+[Unit]
+Description=CMF Phone 1 Wi-Fi/Bluetooth bring-up (MT6878 connectivity, NVRAM calibration)
+Documentation=file:///usr/local/sbin/cmf-wifi-calibrate
+DefaultDependencies=no
+After=systemd-udevd.service systemd-modules-load.service local-fs.target
+Before=NetworkManager.service bluetooth.service wpa_supplicant.service network-pre.target
+Wants=network-pre.target
+# Only on native boot with modules built for this kernel.
+ConditionPathExists=/usr/local/lib/cmf-wifi/%v
+ConditionPathExists=!/sys/class/net/wlan0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/cmf-wifi-calibrate
+TimeoutStartSec=150
+
+[Install]
+WantedBy=sysinit.target
