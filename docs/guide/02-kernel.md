@@ -1,6 +1,6 @@
 # 2. Build the kernel
 
-The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) at commit `12f2e9f04` (Linux 7.2 development, 28 Aug 2026) plus the 14 patches in `kernel/patches/`:
+The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) at commit `12f2e9f04` (Linux 7.2 development, 28 Aug 2026) plus the 18 patches in `kernel/patches/`.
 
 | Patch | Area |
 |---|---|
@@ -18,6 +18,10 @@ The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) 
 | 0012 | net/wwan: MediaTek CCCI modem (data, voice) |
 | 0013 | ASoC: MT6878 audio platform and MT6685 codec |
 | 0014 | ASoC: aw88261: load the speaker tuning file late if missing at boot |
+| 0015 | RTC: read the MT6685 clock on SPMI slave 9 |
+| 0016 | RTC: set the MT6685 clock using the PMIC write trigger |
+| 0017 | IIO: accelerometer and ambient light over the LK-provisioned MT6878 SCP |
+| 0018 | IIO: drain sensor data while waiting for SCP control acknowledgements |
 
 ## 2.1 Firmware built into the Image
 
@@ -55,7 +59,9 @@ The first build takes 15–40 minutes. When you only change the initramfs (for e
 
 - **Kernel command line.** `CONFIG_CMDLINE_FORCE=y` ignores LK's arguments and uses `console=tty0 earlycon keep_bootcon clk_ignore_unused pd_ignore_unused regulator_ignore_unused panic=15 printk.devkmsg=on loglevel=8`. The `*_ignore_unused` flags keep the modem and display clocks and rails that LK left on.
 - **Device tree.** `kernel/dts/` holds the device tree as a flat DTS (decompiled form, numeric phandles). `mt6878-cmf-phone-1-polled-keys.dts` is a fallback that polls the PMIC keys instead of using their IRQs.
-- **Built-in drivers.** Display, GPU (Panthor), modem (CCCI), battery and keys are built in. The MediaTek connectivity stack (Wi-Fi/BT) and the Kinibi TEE driver are out-of-tree modules: see `drivers-oot/connectivity/` and `drivers-oot/`.
+- **Built-in drivers.** Display, GPU (Panthor), modem (CCCI), battery, keys and the MT6685 RTC driver are built in. The MediaTek connectivity stack (Wi-Fi/BT) and the Kinibi TEE driver are out-of-tree modules: see `drivers-oot/connectivity/` and `drivers-oot/`.
+- **Hardware clock.** The MT6685 provides `/dev/rtc0`. Linux reads it at boot and keeps it in UTC. Run `timedatectl` to compare the system time and hardware clock.
+- **Rotation and ambient light.** The CMF SCP driver exposes the accelerometer and light sensor through IIO using the stock firmware provisioned by LK. The Phosh rootfs installs `iio-sensor-proxy`. On an existing rootfs, install it and use `monitor-sensor --accel --light` to check live readings.
 - **Building the out-of-tree modules.** Point them at the same `out/` directory: `make -C ~/cmf-build/linux O=~/cmf-build/out ARCH=arm64 LLVM=1 M=$PWD modules`.
 - **Module signing.** The config enables module signing with a key generated at build time (`out/certs/signing_key.pem`). Out-of-tree modules must be built against the same `out/` tree so they get signed with it.
 

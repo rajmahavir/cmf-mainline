@@ -46,6 +46,7 @@ grep
 grim
 gzip
 hostname
+iio-sensor-proxy
 init-system-helpers
 iproute2
 iputils-ping

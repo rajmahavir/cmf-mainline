@@ -1,0 +1,124 @@
+From 3e8c347142371ba57e53c77c6b8950d6017e758e Mon Sep 17 00:00:00 2001
+From: CMF mainline <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 13:19:45 +0000
+Subject: [PATCH] iio: drain CMF SCP data during sensor control waits
+
+Service data notifications while waiting for a matching control reply, including after the sampling work is frozen for suspend. Reissue both enable requests after an aborted suspend and log failed control sends and acknowledgements.
+---
+ drivers/iio/cmf-scp-sensors.c | 69 +++++++++++++++++++++++++++++------
+ 1 file changed, 57 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/iio/cmf-scp-sensors.c b/drivers/iio/cmf-scp-sensors.c
+index c60995267..b1d675359 100644
+--- a/drivers/iio/cmf-scp-sensors.c
++++ b/drivers/iio/cmf-scp-sensors.c
+@@ -130,6 +130,7 @@ struct cmf_scp {
+ 	bool light_enabled;
+ 	bool clock_voted;
+ 	bool released;
++	bool rings_ready;
+ };
+ 
+ static const struct sensor_ring sensor_rings[] = {
+@@ -244,21 +245,60 @@ static int sensor_notify(struct cmf_scp *scp, u8 seq, u8 command, u8 *reply)
+ 	return 0;
+ }
+ 
++static int sensor_collect(struct cmf_scp *scp);
++
++static int sensor_read_control_ack(struct cmf_scp *scp, const u8 *request, u8 *ack)
++{
++	int ret;
++
++	ret = sensor_receive(scp, SCP_CONTROL_RX, SCP_CONTROL_RX_BIT, ack,
++			     SENSOR_ACK_SIZE, false);
++	if (!ret && ack[0] != request[0])
++		return -EAGAIN;
++	if (ret != -EAGAIN)
++		return ret;
++
++	/*
++	 * The SCP can wait for AP to acknowledge a data notification
++	 * before replying to control. Service notifications here because
++	 * the sampling work is stopped while changing power state.
++	 */
++	if (scp->rings_ready) {
++		ret = sensor_collect(scp);
++		if (ret && ret != -EAGAIN)
++			return ret;
++	}
++
++	return -EAGAIN;
++}
++
+ static int sensor_control(struct cmf_scp *scp, u8 *packet, size_t size)
+ {
+ 	u8 ack[SENSOR_ACK_SIZE];
+-	int ret;
++	int ret, received;
+ 
+ 	packet[SENSOR_PACKET_CRC] = sensor_crc(packet);
+ 	ret = sensor_send(scp, SCP_CONTROL_TX, SCP_CONTROL_TX_BIT, packet, size);
+-	if (ret)
++	if (ret) {
++		dev_err_ratelimited(scp->dev, "Sensor control send failed (%u/%u): %d\n",
++				    packet[1], packet[2], ret);
+ 		return ret;
+-	ret = sensor_receive(scp, SCP_CONTROL_RX, SCP_CONTROL_RX_BIT, ack, sizeof(ack), true);
++	}
++
++	ret = read_poll_timeout(sensor_read_control_ack, received,
++				received != -EAGAIN, 100, 500000, false,
++				scp, packet, ack);
++	if (!ret)
++		ret = received;
++	if (!ret && (ack[1] != packet[1] || ack[2] != packet[2]))
++		ret = -EPROTO;
++	if (!ret && (s8)ack[3] < 0)
++		ret = -EREMOTEIO;
+ 	if (ret)
+-		return ret;
+-	if (ack[0] != packet[0] || ack[1] != packet[1] || ack[2] != packet[2])
+-		return -EPROTO;
+-	return (s8)ack[3] < 0 ? -EREMOTEIO : 0;
++		dev_err_ratelimited(scp->dev, "Sensor control ACK failed (%u/%u): %d\n",
++				    packet[1], packet[2], ret);
++
++	return ret;
+ }
+ 
+ static int sensor_config_rings(struct cmf_scp *scp)
+@@ -499,13 +539,17 @@ static int sensor_set_stream(struct cmf_scp *scp, u8 type, u64 period, bool *ena
+ 
+ static int sensor_start_streams(struct cmf_scp *scp)
+ {
+-	int ret;
++	int accel, light;
+ 
+-	ret = sensor_set_stream(scp, SENSOR_ACCEL, 50 * NSEC_PER_MSEC, &scp->accel_enabled);
+-	if (ret)
+-		return ret;
++	/* A failed disable transaction may still have stopped the sensor. */
++	accel = sensor_enable(scp, SENSOR_ACCEL, 50 * NSEC_PER_MSEC);
++	if (!accel)
++		scp->accel_enabled = true;
++	light = sensor_enable(scp, SENSOR_LIGHT, 100 * NSEC_PER_MSEC);
++	if (!light)
++		scp->light_enabled = true;
+ 
+-	return sensor_set_stream(scp, SENSOR_LIGHT, 100 * NSEC_PER_MSEC, &scp->light_enabled);
++	return accel ?: light;
+ }
+ 
+ static int sensor_stop_streams(struct cmf_scp *scp)
+@@ -676,6 +720,7 @@ static int scp_start(struct cmf_scp *scp, void __iomem *clock)
+ 	ret = sensor_read_list(scp);
+ 	if (ret)
+ 		return dev_err_probe(scp->dev, ret, "Sensor enumeration failed\n");
++	scp->rings_ready = true;
+ 
+ 	return 0;
+ }
+-- 
+2.53.0
+

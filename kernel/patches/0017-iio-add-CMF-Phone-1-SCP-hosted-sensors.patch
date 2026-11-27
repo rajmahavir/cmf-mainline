@@ -1,0 +1,991 @@
+From d9fe934c072a666730866ca0c23908b901161765 Mon Sep 17 00:00:00 2001
+From: CMF mainline <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 13:04:32 +0000
+Subject: [PATCH] iio: add CMF Phone 1 SCP-hosted sensors
+
+Use the authenticated MT6878 SCP firmware provisioned by LK to expose the handset accelerometer and ambient-light sensor. Validate the handoff and shared rings before exposing IIO devices, and stop the streams for system sleep and shutdown.
+---
+ .../iio/nothing,tetris-scp-sensors.yaml       |  58 ++
+ drivers/iio/Kconfig                           |   9 +
+ drivers/iio/Makefile                          |   2 +
+ drivers/iio/cmf-scp-sensors.c                 | 873 ++++++++++++++++++
+ 4 files changed, 942 insertions(+)
+ create mode 100644 Documentation/devicetree/bindings/iio/nothing,tetris-scp-sensors.yaml
+ create mode 100644 drivers/iio/cmf-scp-sensors.c
+
+diff --git a/Documentation/devicetree/bindings/iio/nothing,tetris-scp-sensors.yaml b/Documentation/devicetree/bindings/iio/nothing,tetris-scp-sensors.yaml
+new file mode 100644
+index 000000000..515b7934b
+--- /dev/null
++++ b/Documentation/devicetree/bindings/iio/nothing,tetris-scp-sensors.yaml
+@@ -0,0 +1,58 @@
++# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
++%YAML 1.2
++---
++$id: http://devicetree.org/schemas/iio/nothing,tetris-scp-sensors.yaml#
++$schema: http://devicetree.org/meta-schemas/core.yaml#
++
++title: CMF Phone 1 SCP-hosted sensors
++
++maintainers:
++  - CMF mainline <cmf-mainline@users.noreply.github.com>
++
++description:
++  On the CMF Phone 1, the LK bootloader prepares authenticated MediaTek SCP
++  firmware. The application processor accesses the phone's accelerometer and
++  ambient light sensor through SCP mailbox 1 and reserved shared memory.
++
++properties:
++  compatible:
++    const: nothing,tetris-scp-sensors
++
++  reg:
++    items:
++      - description: SCP tightly coupled memory
++      - description: SCP core 0 configuration registers
++      - description: SCP mailbox 1 registers
++      - description: SCP clock mux and gate status register
++      - description: SCP application processor interrupt clear register
++
++  reg-names:
++    items:
++      - const: tcm
++      - const: core
++      - const: mailbox
++      - const: clock-status
++      - const: ap-irq-clear
++
++  mediatek,infracfg:
++    $ref: /schemas/types.yaml#/definitions/phandle
++    description: Infrastructure control syscon with the SCP wake registers
++
++  memory-region:
++    maxItems: 1
++    description: Reserved SCP shared DRAM region
++
++  mount-matrix:
++    $ref: /schemas/types.yaml#/definitions/string-array
++    minItems: 9
++    maxItems: 9
++    description: Transformation from firmware-reported acceleration axes to handset axes
++
++required:
++  - compatible
++  - reg
++  - reg-names
++  - mediatek,infracfg
++  - memory-region
++
++additionalProperties: false
+diff --git a/drivers/iio/Kconfig b/drivers/iio/Kconfig
+index 661127aed..486ecf4bd 100644
+--- a/drivers/iio/Kconfig
++++ b/drivers/iio/Kconfig
+@@ -81,6 +81,15 @@ config IIO_BACKEND
+ 	  multiple backend devices. The framework then makes it easy to get
+ 	  and control such backend devices.
+ 
++config CMF_SCP_SENSORS
++	tristate "CMF Phone 1 SCP-hosted sensors"
++	depends on ARCH_MEDIATEK && ARM64 && OF
++	select MFD_SYSCON
++	help
++	  Expose the accelerometer and ambient-light sensor on the CMF Phone 1.
++	  This uses the MediaTek MT6878 SCP firmware prepared by the handset's
++	  LK bootloader.
++
+ source "drivers/iio/accel/Kconfig"
+ source "drivers/iio/adc/Kconfig"
+ source "drivers/iio/addac/Kconfig"
+diff --git a/drivers/iio/Makefile b/drivers/iio/Makefile
+index cb80ef837..783322fa4 100644
+--- a/drivers/iio/Makefile
++++ b/drivers/iio/Makefile
+@@ -46,3 +46,5 @@ obj-y += resolver/
+ obj-y += temperature/
+ obj-y += test/
+ obj-y += trigger/
++
++obj-$(CONFIG_CMF_SCP_SENSORS) += cmf-scp-sensors.o
+diff --git a/drivers/iio/cmf-scp-sensors.c b/drivers/iio/cmf-scp-sensors.c
+new file mode 100644
+index 000000000..c60995267
+--- /dev/null
++++ b/drivers/iio/cmf-scp-sensors.c
+@@ -0,0 +1,873 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * CMF Phone 1 accelerometer and light sensor hosted by the MT6878 SCP.
++ * LK prepares the authenticated stock firmware; Linux owns the sensor IPI
++ * channels while this driver is bound.
++ */
++#include <linux/arm-smccc.h>
++#include <linux/cleanup.h>
++#include <linux/delay.h>
++#include <linux/iio/iio.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/jiffies.h>
++#include <linux/mfd/syscon.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/of.h>
++#include <linux/of_reserved_mem.h>
++#include <linux/platform_device.h>
++#include <linux/pm.h>
++#include <linux/regmap.h>
++#include <linux/sizes.h>
++#include <linux/slab.h>
++#include <linux/string.h>
++#include <linux/time64.h>
++#include <linux/unaligned.h>
++#include <linux/workqueue.h>
++
++#define SCP_CLK_MUX_MASK		GENMASK(3, 0)
++#define SCP_CLK_POWER_DOWN		BIT(7)
++#define SCP_REGION_INFO			0x04
++#define SCP_REGION_LOADER_SIZE		0x04
++#define SCP_REGION_FIRMWARE_SIZE	0x0c
++#define SCP_REGION_INFO_SIZE		0x1c
++#define SCP_CORE_PC			0x80
++#define SCP_SHARED_BASE			0x44
++#define SCP_SHARED_SIZE			0x48
++#define SCP_MBOX_READY_WORD		0xc8
++#define SCP_MBOX_READY_BIT		BIT(25)
++
++#define SCP_SIP_FAST_CALL(id)						\
++	ARM_SMCCC_CALL_VAL(ARM_SMCCC_FAST_CALL, ARM_SMCCC_SMC_64,		\
++			   ARM_SMCCC_OWNER_SIP, (id))
++#define SCP_SIP_DVFS			SCP_SIP_FAST_CALL(0x232)
++#define SCP_SIP_CONTROL			SCP_SIP_FAST_CALL(0x528)
++#define SCP_DVFS_RESOURCE_REQ		1
++#define SCP_DVFS_RELEASE		0
++#define SCP_DVFS_26MHZ			BIT(0)
++#define SCP_RESET_ASSERT		2
++#define SCP_RESET_RELEASE		3
++
++#define SCP_SAMPLE_INTERVAL_MS		40
++#define SCP_INITIAL_SAMPLE_TIMEOUT_MS	1000
++#define SCP_DATA_DRAIN_LIMIT		4
++
++#define SCP_WAKE_REQUEST		0xb14
++#define SCP_WAKE_CLEAR			0xb18
++#define SCP_WAKE_TAG			0xa0
++#define SCP_WAKE_LOCK			BIT(0)
++#define SCP_WAKE_UNLOCK			BIT(1)
++
++#define SCP_MBOX_SET			0x100
++#define SCP_MBOX_PENDING		0x10c
++#define SCP_LOGGER_RX			0xb0
++#define SCP_CONTROL_TX			0x28
++#define SCP_NOTIFY_TX			0x68
++#define SCP_CONTROL_RX			0xd0
++#define SCP_NOTIFY_RX			0xd8
++#define SCP_ERROR_RX			0x88
++#define SCP_CONTROL_TX_BIT		BIT(5)
++#define SCP_NOTIFY_TX_BIT		BIT(13)
++#define SCP_CONTROL_RX_BIT		BIT(26)
++#define SCP_NOTIFY_RX_BIT		BIT(27)
++#define SCP_LOGGER_RX_BIT		BIT(22)
++#define SCP_ERROR_RX_BIT		BIT(17)
++#define SCP_LOGGER_INIT			0x4c4f4701
++#define SCP_LOGGER_PLT_MAGIC		0x504c5402
++#define SCP_TCM_SIZE			SZ_1M
++#define SCP_LOGGER_OFFSET		0xff2700
++#define SCP_LOGGER_SIZE			0x180000
++
++#define SENSOR_DISABLE			0
++#define SENSOR_ENABLE			1
++#define SENSOR_ACCEL			1
++#define SENSOR_LIGHT			5
++#define SENSOR_READY			4
++#define SENSOR_LIST			5
++#define SENSOR_SHARE_MEMORY		11
++#define SENSOR_DATA_OFFSET		0xef2700
++#define SENSOR_DATA_REGION_SIZE		0x100000
++#define SENSOR_DATA_ENTRY		36
++#define SENSOR_LIST_OFFSET		0x11a6700
++#define SENSOR_LIST_REGION_SIZE		0x1000
++#define SENSOR_PACKET_CRC		4
++#define SENSOR_NOTIFY_SIZE		28
++#define SENSOR_CONTROL_SIZE		44
++#define SENSOR_ACK_SIZE			8
++#define SENSOR_RING_HEADER		16
++#define SENSOR_LIST_ENTRY		40
++
++struct sensor_ring {
++	u32 offset;
++	u32 size;
++	u32 item_size;
++};
++
++struct cmf_scp {
++	struct device *dev;
++	void __iomem *tcm;
++	void __iomem *core;
++	void __iomem *mbox;
++	struct regmap *infra;
++	void __iomem *ap_irq_clear;
++	void __iomem *shared;
++	phys_addr_t shared_base;
++	phys_addr_t shared_size;
++	struct delayed_work sample_work;
++	struct mutex sample_lock;
++	struct iio_mount_matrix orientation;
++	unsigned long accel_stamp;
++	u32 read_pos;
++	u32 accel_gain;
++	u32 light_gain;
++	s32 axes[3];
++	s32 lux;
++	u8 sequence;
++	bool accel_valid;
++	bool light_valid;
++	bool accel_enabled;
++	bool light_enabled;
++	bool clock_voted;
++	bool released;
++};
++
++static const struct sensor_ring sensor_rings[] = {
++	{ SENSOR_DATA_OFFSET, SENSOR_DATA_REGION_SIZE, SENSOR_DATA_ENTRY },
++	{ 0x1196700, 0x10000, 76 },	/* extended events */
++	{ SENSOR_LIST_OFFSET, SENSOR_LIST_REGION_SIZE, SENSOR_LIST_ENTRY },
++	{ 0x11a7700, 0x2000, 4040 },	/* debug reply */
++	{ 0x11a9700, 0x100, 64 },	/* custom request */
++	{ 0x11a9800, 0x100, 64 },	/* custom reply */
++};
++
++static u8 sensor_crc(const u8 *header)
++{
++	u8 crc = 0;
++	int i, bit;
++
++	for (i = 0; i < SENSOR_PACKET_CRC; i++) {
++		crc ^= header[i];
++		for (bit = 0; bit < 8; bit++)
++			crc = (crc >> 1) ^ ((crc & 1) ? 0x8c : 0);
++	}
++	return crc;
++}
++
++static int sensor_awake(struct regmap *infra, u32 operation)
++{
++	u32 status;
++	int ret, clear;
++
++	ret = regmap_write(infra, SCP_WAKE_REQUEST, SCP_WAKE_TAG | operation);
++	if (ret)
++		return ret;
++	ret = regmap_read_poll_timeout(infra, SCP_WAKE_REQUEST, status,
++				       !(status & operation), 10, 100000);
++	clear = regmap_write(infra, SCP_WAKE_CLEAR, SCP_WAKE_TAG | operation);
++	if (!ret && (status & SCP_WAKE_TAG) != SCP_WAKE_TAG)
++		ret = -EPROTO;
++
++	return ret ?: clear;
++}
++
++static int sensor_send(struct cmf_scp *scp, u32 offset, u32 mask,
++		       const u8 *packet, size_t size)
++{
++	void __iomem *mbox = scp->mbox;
++	u32 pending;
++	int i, ret, unlock;
++
++	ret = sensor_awake(scp->infra, SCP_WAKE_LOCK);
++	if (ret)
++		return ret;
++	ret = readl_poll_timeout(mbox + SCP_MBOX_SET, pending,
++				 !(pending & mask), 10, 100000);
++	if (!ret) {
++		for (i = 0; i < size; i += sizeof(u32))
++			writel(get_unaligned_le32(packet + i), mbox + offset + i);
++		writel(mask, mbox + SCP_MBOX_SET);
++	}
++	unlock = sensor_awake(scp->infra, SCP_WAKE_UNLOCK);
++	return ret ? ret : unlock;
++}
++
++static int sensor_receive(struct cmf_scp *scp, u32 offset, u32 mask, u8 *packet,
++			  size_t size, bool wait)
++{
++	void __iomem *mbox = scp->mbox;
++	u32 pending;
++	int i, ret;
++
++	if (wait) {
++		ret = readl_poll_timeout(mbox + SCP_MBOX_PENDING, pending,
++					 pending & (mask | SCP_ERROR_RX_BIT), 100, 500000);
++		if (ret)
++			return ret;
++	} else {
++		pending = readl(mbox + SCP_MBOX_PENDING);
++		if (!(pending & (mask | SCP_ERROR_RX_BIT)))
++			return -EAGAIN;
++	}
++
++	if (pending & SCP_ERROR_RX_BIT) {
++		dev_err_ratelimited(scp->dev, "SCP firmware error case=%u sensor=%u\n",
++				    readl(mbox + SCP_ERROR_RX),
++				    readl(mbox + SCP_ERROR_RX + 4));
++		writel(1, scp->ap_irq_clear);
++		writel(SCP_ERROR_RX_BIT, mbox + SCP_MBOX_PENDING);
++		return -EREMOTEIO;
++	}
++
++	for (i = 0; i < size; i += sizeof(u32))
++		put_unaligned_le32(readl(mbox + offset + i), packet + i);
++	writel(1, scp->ap_irq_clear);
++	writel(mask, mbox + SCP_MBOX_PENDING);
++	return packet[SENSOR_PACKET_CRC] == sensor_crc(packet) ? 0 : -EBADMSG;
++}
++
++static int sensor_notify(struct cmf_scp *scp, u8 seq, u8 command, u8 *reply)
++{
++	u8 packet[SENSOR_NOTIFY_SIZE] = { seq, 0, command, 0 };
++	int ret;
++
++	packet[SENSOR_PACKET_CRC] = sensor_crc(packet);
++	ret = sensor_send(scp, SCP_NOTIFY_TX, SCP_NOTIFY_TX_BIT, packet, sizeof(packet));
++	if (ret)
++		return ret;
++	ret = sensor_receive(scp, SCP_NOTIFY_RX, SCP_NOTIFY_RX_BIT, reply, sizeof(packet), true);
++	if (ret)
++		return ret;
++	if (reply[2] != command || reply[1] || reply[3] > 20 ||
++	    (command == SENSOR_LIST && reply[0] != seq))
++		return -EPROTO;
++	return 0;
++}
++
++static int sensor_control(struct cmf_scp *scp, u8 *packet, size_t size)
++{
++	u8 ack[SENSOR_ACK_SIZE];
++	int ret;
++
++	packet[SENSOR_PACKET_CRC] = sensor_crc(packet);
++	ret = sensor_send(scp, SCP_CONTROL_TX, SCP_CONTROL_TX_BIT, packet, size);
++	if (ret)
++		return ret;
++	ret = sensor_receive(scp, SCP_CONTROL_RX, SCP_CONTROL_RX_BIT, ack, sizeof(ack), true);
++	if (ret)
++		return ret;
++	if (ack[0] != packet[0] || ack[1] != packet[1] || ack[2] != packet[2])
++		return -EPROTO;
++	return (s8)ack[3] < 0 ? -EREMOTEIO : 0;
++}
++
++static int sensor_config_rings(struct cmf_scp *scp)
++{
++	const struct sensor_ring *ring;
++	u8 packet[SENSOR_CONTROL_SIZE];
++	void __iomem *ram;
++	unsigned int i, group, count;
++	int ret;
++
++	for (i = 0; i < ARRAY_SIZE(sensor_rings); i++) {
++		ring = &sensor_rings[i];
++		ram = scp->shared + ring->offset;
++		writel(0, ram);
++		writel(0, ram + 4);
++		writel((ring->size - SENSOR_RING_HEADER) / ring->item_size *
++		       ring->item_size, ram + 8);
++		writel(ring->item_size, ram + 12);
++	}
++
++	/* Publish all ring headers before passing their addresses to the SCP. */
++	wmb();
++	for (group = 0; group < ARRAY_SIZE(sensor_rings); group += 4) {
++		count = min_t(unsigned int, 4, ARRAY_SIZE(sensor_rings) - group);
++		memset(packet, 0, sizeof(packet));
++		packet[0] = ++scp->sequence;
++		packet[2] = SENSOR_SHARE_MEMORY;
++		packet[3] = 36;
++		packet[8] = count;
++		for (i = 0; i < count; i++) {
++			/* The packed payload starts its entries at byte 1. */
++			packet[9 + i * 8] = group + i;
++			put_unaligned_le32(scp->shared_base + sensor_rings[group + i].offset,
++					   packet + 13 + i * 8);
++		}
++		ret = sensor_control(scp, packet, sizeof(packet));
++		if (ret)
++			return ret;
++	}
++	return 0;
++}
++
++static int sensor_init_logger(struct cmf_scp *scp)
++{
++	void __iomem *mbox = scp->mbox;
++	void __iomem *logger = scp->shared + SCP_LOGGER_OFFSET;
++	u8 packet[24] = {};
++	u32 pending, address;
++	int ret;
++
++	ret = readl_poll_timeout(mbox + SCP_MBOX_PENDING, pending,
++				 pending & SCP_LOGGER_RX_BIT, 100, 500000);
++	if (ret)
++		return ret;
++	if (readl(mbox + SCP_LOGGER_RX) != SCP_LOGGER_INIT)
++		return -EPROTO;
++	address = readl(mbox + SCP_LOGGER_RX + 4);
++	if (address < 0x100 || address > SCP_TCM_SIZE - sizeof(u32) ||
++	    !IS_ALIGNED(address, sizeof(u32)))
++		return -EPROTO;
++	writel(1, scp->ap_irq_clear);
++	writel(SCP_LOGGER_RX_BIT, mbox + SCP_MBOX_PENDING);
++
++	writel(SCP_LOGGER_PLT_MAGIC, logger);
++	writel(24, logger + 4);
++	writel(0, logger + 8);
++	writel(24, logger + 12);
++	writel(32, logger + 16);
++	writel(0x100000, logger + 20);
++	writel(0, logger + 24);
++	writel(0, logger + 28);
++	/* Publish the logger header before the SCP sees its address. */
++	wmb();
++	writel(scp->shared_base + SCP_LOGGER_OFFSET, scp->tcm + address);
++
++	put_unaligned_le32(SCP_LOGGER_INIT, packet);
++	put_unaligned_le32(scp->shared_base + SCP_LOGGER_OFFSET, packet + 4);
++	put_unaligned_le32(SCP_LOGGER_SIZE, packet + 8);
++	return sensor_send(scp, 0, BIT(0), packet, sizeof(packet));
++}
++
++static int sensor_read_list(struct cmf_scp *scp)
++{
++	const unsigned int ring_size = (SENSOR_LIST_REGION_SIZE - SENSOR_RING_HEADER) /
++				       SENSOR_LIST_ENTRY * SENSOR_LIST_ENTRY;
++	u8 reply[SENSOR_NOTIFY_SIZE], record[SENSOR_LIST_ENTRY];
++	void __iomem *list = scp->shared + SENSOR_LIST_OFFSET;
++	unsigned int wp, i;
++	int ret;
++
++	ret = sensor_notify(scp, ++scp->sequence, SENSOR_LIST, reply);
++	if (ret)
++		return ret;
++	wp = get_unaligned_le32(reply + 8);
++	if (reply[3] < sizeof(u32) || wp >= ring_size ||
++	    wp % SENSOR_LIST_ENTRY || wp != readl(list + 4))
++		return -EPROTO;
++
++	for (i = 0; i < wp; i += SENSOR_LIST_ENTRY) {
++		memcpy_fromio(record, list + SENSOR_RING_HEADER + i, sizeof(record));
++		if (record[0] == SENSOR_ACCEL &&
++		    !strncmp((const char *)record + 8, "icm4n607_acc", 16))
++			scp->accel_gain = get_unaligned_le32(record + 4);
++		if (record[0] == SENSOR_LIGHT &&
++		    !strncmp((const char *)record + 8, "ltr569_als", 16))
++			scp->light_gain = get_unaligned_le32(record + 4);
++	}
++	if (!scp->accel_gain || scp->accel_gain > INT_MAX ||
++	    !scp->light_gain || scp->light_gain > INT_MAX)
++		return -ENODEV;
++
++	return 0;
++}
++
++static int sensor_enable(struct cmf_scp *scp, u8 type, u64 period_ns)
++{
++	u8 packet[24] = { ++scp->sequence, type, SENSOR_DISABLE, 0 };
++
++	if (!period_ns)
++		return sensor_control(scp, packet, 8);
++	packet[2] = SENSOR_ENABLE;
++	packet[3] = 16;
++	put_unaligned_le64(period_ns, packet + 8);
++	return sensor_control(scp, packet, sizeof(packet));
++}
++
++static void sensor_invalidate(struct cmf_scp *scp)
++{
++	guard(mutex)(&scp->sample_lock);
++	scp->accel_valid = false;
++	scp->light_valid = false;
++}
++
++static int sensor_collect(struct cmf_scp *scp)
++{
++	const unsigned int ring_size = (SENSOR_DATA_REGION_SIZE - SENSOR_RING_HEADER) /
++				       SENSOR_DATA_ENTRY * SENSOR_DATA_ENTRY;
++	u8 packet[SENSOR_NOTIFY_SIZE], record[SENSOR_DATA_ENTRY];
++	void __iomem *data = scp->shared + SENSOR_DATA_OFFSET;
++	u32 wp;
++	int ret;
++
++	ret = sensor_receive(scp, SCP_NOTIFY_RX, SCP_NOTIFY_RX_BIT,
++			     packet, sizeof(packet), false);
++	if (ret)
++		return ret;
++	if (packet[2] > 1)
++		return 0;
++	if (packet[3] < sizeof(u32))
++		return -EPROTO;
++
++	wp = get_unaligned_le32(packet + 8);
++	if (wp >= ring_size || wp % SENSOR_DATA_ENTRY)
++		return -EPROTO;
++
++	guard(mutex)(&scp->sample_lock);
++	while (scp->read_pos != wp) {
++		memcpy_fromio(record, data + SENSOR_RING_HEADER + scp->read_pos,
++			      sizeof(record));
++		scp->read_pos = (scp->read_pos + SENSOR_DATA_ENTRY) % ring_size;
++		if (record[1])
++			continue;
++
++		switch (record[0]) {
++		case SENSOR_ACCEL:
++			if (!scp->accel_enabled)
++				break;
++			scp->axes[0] = get_unaligned_le32(record + 12);
++			scp->axes[1] = get_unaligned_le32(record + 16);
++			scp->axes[2] = get_unaligned_le32(record + 20);
++			scp->accel_stamp = jiffies;
++			scp->accel_valid = true;
++			break;
++		case SENSOR_LIGHT:
++			if (!scp->light_enabled)
++				break;
++			scp->lux = get_unaligned_le32(record + 12);
++			scp->light_valid = true;
++			break;
++		}
++	}
++	writel(scp->read_pos, data);
++
++	return 0;
++}
++
++static void sensor_poll(struct work_struct *work)
++{
++	struct cmf_scp *scp = container_of(to_delayed_work(work), struct cmf_scp,
++					  sample_work);
++	int ret, i;
++
++	for (i = 0; i < SCP_DATA_DRAIN_LIMIT; i++) {
++		ret = sensor_collect(scp);
++		if (ret == -EAGAIN)
++			break;
++		if (ret) {
++			sensor_invalidate(scp);
++			dev_warn_ratelimited(scp->dev, "Sensor notification failed: %d\n", ret);
++			break;
++		}
++	}
++	queue_delayed_work(system_freezable_wq, &scp->sample_work,
++			   msecs_to_jiffies(SCP_SAMPLE_INTERVAL_MS));
++}
++
++static int sensor_wait_first_sample(struct cmf_scp *scp)
++{
++	unsigned long deadline = jiffies + msecs_to_jiffies(SCP_INITIAL_SAMPLE_TIMEOUT_MS);
++	int ret;
++
++	do {
++		ret = sensor_collect(scp);
++		if (ret && ret != -EAGAIN)
++			return ret;
++		if (scp->accel_valid && scp->light_valid)
++			return 0;
++		if (ret == -EAGAIN)
++			usleep_range(5000, 10000);
++	} while (time_before(jiffies, deadline));
++
++	return -ETIMEDOUT;
++}
++
++static int sensor_set_stream(struct cmf_scp *scp, u8 type, u64 period, bool *enabled)
++{
++	int ret;
++
++	if (*enabled == !!period)
++		return 0;
++
++	ret = sensor_enable(scp, type, period);
++	if (!ret)
++		*enabled = !!period;
++
++	return ret;
++}
++
++static int sensor_start_streams(struct cmf_scp *scp)
++{
++	int ret;
++
++	ret = sensor_set_stream(scp, SENSOR_ACCEL, 50 * NSEC_PER_MSEC, &scp->accel_enabled);
++	if (ret)
++		return ret;
++
++	return sensor_set_stream(scp, SENSOR_LIGHT, 100 * NSEC_PER_MSEC, &scp->light_enabled);
++}
++
++static int sensor_stop_streams(struct cmf_scp *scp)
++{
++	int light, accel;
++
++	light = sensor_set_stream(scp, SENSOR_LIGHT, 0, &scp->light_enabled);
++	accel = sensor_set_stream(scp, SENSOR_ACCEL, 0, &scp->accel_enabled);
++	sensor_invalidate(scp);
++
++	return light ?: accel;
++}
++
++static int cmf_scp_read_raw(struct iio_dev *iio, const struct iio_chan_spec *chan,
++			    int *value, int *divisor, long mask)
++{
++	struct cmf_scp *scp = *(struct cmf_scp **)iio_priv(iio);
++	int ret = -EAGAIN;
++
++	mutex_lock(&scp->sample_lock);
++	switch (mask) {
++	case IIO_CHAN_INFO_RAW:
++		if (scp->accel_valid && time_before(jiffies, scp->accel_stamp + HZ)) {
++			*value = scp->axes[chan->address];
++			ret = IIO_VAL_INT;
++		}
++		break;
++	case IIO_CHAN_INFO_SCALE:
++		*value = 1;
++		*divisor = scp->accel_gain;
++		ret = IIO_VAL_FRACTIONAL;
++		break;
++	case IIO_CHAN_INFO_PROCESSED:
++		/* The light sensor may send nothing while illuminance is stable. */
++		if (scp->light_valid && scp->accel_valid &&
++		    time_before(jiffies, scp->accel_stamp + HZ)) {
++			*value = scp->lux;
++			*divisor = scp->light_gain;
++			ret = IIO_VAL_FRACTIONAL;
++		}
++		break;
++	default:
++		ret = -EINVAL;
++	}
++	mutex_unlock(&scp->sample_lock);
++	return ret;
++}
++
++static const struct iio_mount_matrix *
++cmf_scp_get_mount_matrix(const struct iio_dev *iio, const struct iio_chan_spec *chan)
++{
++	struct cmf_scp *scp = *(struct cmf_scp **)iio_priv(iio);
++
++	return &scp->orientation;
++}
++
++static const struct iio_chan_spec_ext_info cmf_scp_accel_ext_info[] = {
++	IIO_MOUNT_MATRIX(IIO_SHARED_BY_TYPE, cmf_scp_get_mount_matrix),
++	{},
++};
++
++static const struct iio_info cmf_scp_iio_info = {
++	.read_raw = cmf_scp_read_raw,
++};
++
++#define CMF_SCP_ACCEL_CHANNEL(axis, index) {				\
++	.type = IIO_ACCEL,						\
++	.modified = 1,							\
++	.channel2 = IIO_MOD_##axis,					\
++	.ext_info = cmf_scp_accel_ext_info,			\
++	.address = (index),						\
++	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),			\
++	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),		\
++}
++
++static const struct iio_chan_spec cmf_scp_accel_channels[] = {
++	CMF_SCP_ACCEL_CHANNEL(X, 0),
++	CMF_SCP_ACCEL_CHANNEL(Y, 1),
++	CMF_SCP_ACCEL_CHANNEL(Z, 2),
++};
++
++static const struct iio_chan_spec cmf_scp_light_channels[] = {
++	{
++		.type = IIO_LIGHT,
++		.info_mask_separate = BIT(IIO_CHAN_INFO_PROCESSED),
++	},
++};
++
++static int cmf_scp_register_iio(struct cmf_scp *scp, const char *name,
++				const struct iio_chan_spec *channels, unsigned int count)
++{
++	struct iio_dev *iio;
++
++	iio = devm_iio_device_alloc(scp->dev, sizeof(scp));
++	if (!iio)
++		return -ENOMEM;
++
++	*(struct cmf_scp **)iio_priv(iio) = scp;
++	iio->name = name;
++	iio->info = &cmf_scp_iio_info;
++	iio->modes = INDIO_DIRECT_MODE;
++	iio->channels = channels;
++	iio->num_channels = count;
++
++	return devm_iio_device_register(scp->dev, iio);
++}
++
++static long scp_sip(unsigned int function, unsigned int command, u32 argument)
++{
++	struct arm_smccc_res res;
++
++	arm_smccc_smc(function, command, argument, 0, 0, 0, 0, 0, &res);
++
++	return (long)res.a0;
++}
++
++static int scp_start(struct cmf_scp *scp, void __iomem *clock)
++{
++	void __iomem *info = scp->tcm + SCP_REGION_INFO;
++	u8 reply[SENSOR_NOTIFY_SIZE];
++	u32 loader, firmware, info_size, pending;
++	long smc;
++	int ret;
++
++	if (readl(clock) & (SCP_CLK_MUX_MASK | SCP_CLK_POWER_DOWN))
++		return dev_err_probe(scp->dev, -ENODEV, "Unexpected LK SCP clock state\n");
++
++	loader = readl(info + SCP_REGION_LOADER_SIZE);
++	firmware = readl(info + SCP_REGION_FIRMWARE_SIZE);
++	info_size = readl(info + SCP_REGION_INFO_SIZE);
++	if (!loader || loader > SCP_TCM_SIZE || !firmware || !info_size || info_size > 0x100)
++		return dev_err_probe(scp->dev, -ENODATA, "Missing LK SCP handoff\n");
++	if (readl(scp->core + SCP_CORE_PC) || readl(scp->mbox + SCP_MBOX_PENDING))
++		return dev_err_probe(scp->dev, -EBUSY, "SCP core or mailbox already active\n");
++
++	smc = scp_sip(SCP_SIP_DVFS, SCP_DVFS_RESOURCE_REQ, SCP_DVFS_26MHZ);
++	if (smc)
++		return dev_err_probe(scp->dev, -EIO, "26 MHz resource request failed: %ld\n",
++				     smc);
++	scp->clock_voted = true;
++
++	smc = scp_sip(SCP_SIP_CONTROL, SCP_RESET_RELEASE, 0);
++	if (smc)
++		return dev_err_probe(scp->dev, -EIO, "Secure SCP release failed: %ld\n", smc);
++	scp->released = true;
++
++	ret = readl_poll_timeout(scp->mbox + SCP_MBOX_PENDING, pending,
++				 pending & SCP_MBOX_READY_BIT, 1000, 3000000);
++	if (ret)
++		return dev_err_probe(scp->dev, ret, "SCP READY timed out\n");
++	if (readl(scp->mbox + SCP_MBOX_READY_WORD) != SCP_TCM_SIZE ||
++	    readl(scp->core + SCP_SHARED_BASE) != scp->shared_base ||
++	    readl(scp->core + SCP_SHARED_SIZE) != scp->shared_size)
++		return dev_err_probe(scp->dev, -EPROTO, "SCP shared-memory handoff mismatch\n");
++
++	writel(SCP_MBOX_READY_BIT, scp->mbox + SCP_MBOX_PENDING);
++	writel(0xff, scp->ap_irq_clear);
++
++	ret = sensor_notify(scp, 0, SENSOR_READY, reply);
++	if (ret)
++		return dev_err_probe(scp->dev, ret, "Sensor READY failed\n");
++	ret = sensor_init_logger(scp);
++	if (ret)
++		return dev_err_probe(scp->dev, ret, "Sensor logger handshake failed\n");
++	ret = sensor_config_rings(scp);
++	if (ret)
++		return dev_err_probe(scp->dev, ret, "Sensor shared-memory setup failed\n");
++	ret = sensor_read_list(scp);
++	if (ret)
++		return dev_err_probe(scp->dev, ret, "Sensor enumeration failed\n");
++
++	return 0;
++}
++
++static void cmf_scp_stop(void *data)
++{
++	struct cmf_scp *scp = data;
++	long smc;
++	int ret;
++
++	cancel_delayed_work_sync(&scp->sample_work);
++	if (scp->released) {
++		ret = sensor_stop_streams(scp);
++		if (ret)
++			dev_warn(scp->dev, "Failed to disable sensor streams: %d\n", ret);
++
++		smc = scp_sip(SCP_SIP_CONTROL, SCP_RESET_ASSERT, 0);
++		if (smc) {
++			dev_err(scp->dev, "Secure SCP reset failed: %ld, keeping 26 MHz vote\n",
++				smc);
++			return;
++		}
++		scp->released = false;
++	}
++	if (scp->clock_voted) {
++		smc = scp_sip(SCP_SIP_DVFS, SCP_DVFS_RESOURCE_REQ, SCP_DVFS_RELEASE);
++		if (smc)
++			dev_err(scp->dev, "26 MHz resource release failed: %ld\n", smc);
++		else
++			scp->clock_voted = false;
++	}
++}
++
++static int cmf_scp_map_shared_memory(struct cmf_scp *scp)
++{
++	const struct sensor_ring *last = &sensor_rings[ARRAY_SIZE(sensor_rings) - 1];
++	struct device_node *node;
++	struct reserved_mem *mem;
++	size_t used = last->offset + last->size;
++
++	node = of_parse_phandle(scp->dev->of_node, "memory-region", 0);
++	if (!node)
++		return -ENODEV;
++	mem = of_reserved_mem_lookup(node);
++	of_node_put(node);
++	if (!mem || mem->size < used || mem->base < 0x40000000 ||
++	    mem->base >= 0x90000000 || mem->size > 0x90000000 - mem->base)
++		return -EINVAL;
++
++	scp->shared_base = mem->base;
++	scp->shared_size = mem->size;
++	scp->shared = devm_ioremap_wc(scp->dev, mem->base, used);
++
++	return scp->shared ? 0 : -ENOMEM;
++}
++
++static int cmf_scp_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct cmf_scp *scp;
++	void __iomem *clock;
++	int ret;
++
++	if (!of_machine_is_compatible("nothing,tetris"))
++		return -ENODEV;
++
++	scp = devm_kzalloc(dev, sizeof(*scp), GFP_KERNEL);
++	if (!scp)
++		return -ENOMEM;
++	scp->dev = dev;
++	mutex_init(&scp->sample_lock);
++	INIT_DELAYED_WORK(&scp->sample_work, sensor_poll);
++
++	clock = devm_platform_ioremap_resource_byname(pdev, "clock-status");
++	if (IS_ERR(clock))
++		return PTR_ERR(clock);
++	scp->tcm = devm_platform_ioremap_resource_byname(pdev, "tcm");
++	if (IS_ERR(scp->tcm))
++		return PTR_ERR(scp->tcm);
++	scp->core = devm_platform_ioremap_resource_byname(pdev, "core");
++	if (IS_ERR(scp->core))
++		return PTR_ERR(scp->core);
++	scp->mbox = devm_platform_ioremap_resource_byname(pdev, "mailbox");
++	if (IS_ERR(scp->mbox))
++		return PTR_ERR(scp->mbox);
++	scp->infra = syscon_regmap_lookup_by_phandle(dev->of_node, "mediatek,infracfg");
++	if (IS_ERR(scp->infra))
++		return PTR_ERR(scp->infra);
++	scp->ap_irq_clear = devm_platform_ioremap_resource_byname(pdev, "ap-irq-clear");
++	if (IS_ERR(scp->ap_irq_clear))
++		return PTR_ERR(scp->ap_irq_clear);
++	ret = cmf_scp_map_shared_memory(scp);
++	if (ret)
++		return dev_err_probe(dev, ret, "Invalid SCP shared-memory reservation\n");
++	ret = iio_read_mount_matrix(dev, &scp->orientation);
++	if (ret)
++		return dev_err_probe(dev, ret, "Invalid accelerometer mount matrix\n");
++
++	platform_set_drvdata(pdev, scp);
++	ret = devm_add_action_or_reset(dev, cmf_scp_stop, scp);
++	if (ret)
++		return ret;
++
++	ret = scp_start(scp, clock);
++	if (ret)
++		return ret;
++	ret = sensor_start_streams(scp);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to enable sensor streams\n");
++	ret = sensor_wait_first_sample(scp);
++	if (ret)
++		return dev_err_probe(dev, ret, "Failed to read initial sensor samples\n");
++
++	ret = cmf_scp_register_iio(scp, "cmf-scp-icm4n607", cmf_scp_accel_channels,
++				   ARRAY_SIZE(cmf_scp_accel_channels));
++	if (ret)
++		return ret;
++	ret = cmf_scp_register_iio(scp, "cmf-scp-ltr569", cmf_scp_light_channels,
++				   ARRAY_SIZE(cmf_scp_light_channels));
++	if (ret)
++		return ret;
++
++	queue_delayed_work(system_freezable_wq, &scp->sample_work, 0);
++	dev_info(dev, "SCP accelerometer and ambient-light sensor available\n");
++
++	return 0;
++}
++
++static void cmf_scp_shutdown(struct platform_device *pdev)
++{
++	cmf_scp_stop(platform_get_drvdata(pdev));
++}
++
++static int cmf_scp_suspend(struct device *dev)
++{
++	struct cmf_scp *scp = dev_get_drvdata(dev);
++	int i, ret;
++
++	cancel_delayed_work_sync(&scp->sample_work);
++	ret = sensor_stop_streams(scp);
++	if (!ret) {
++		/* Consume queued notifications with both streams disabled. */
++		for (i = 0; i < SCP_DATA_DRAIN_LIMIT; i++) {
++			ret = sensor_collect(scp);
++			if (ret == -EAGAIN)
++				return 0;
++			if (ret)
++				break;
++		}
++		if (!ret)
++			ret = -EBUSY;
++	}
++
++	if (sensor_start_streams(scp))
++		dev_warn(dev, "Could not restore sensor streams after suspend failure\n");
++	queue_delayed_work(system_freezable_wq, &scp->sample_work, 0);
++
++	return ret;
++}
++
++static int cmf_scp_resume(struct device *dev)
++{
++	struct cmf_scp *scp = dev_get_drvdata(dev);
++	int ret;
++
++	ret = sensor_start_streams(scp);
++	if (ret)
++		dev_warn(dev, "Could not resume both sensor streams: %d\n", ret);
++	queue_delayed_work(system_freezable_wq, &scp->sample_work, 0);
++
++	return ret;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(cmf_scp_pm_ops, cmf_scp_suspend, cmf_scp_resume);
++
++static const struct of_device_id cmf_scp_of_match[] = {
++	{ .compatible = "nothing,tetris-scp-sensors" },
++	{}
++};
++MODULE_DEVICE_TABLE(of, cmf_scp_of_match);
++
++static struct platform_driver cmf_scp_driver = {
++	.probe = cmf_scp_probe,
++	.shutdown = cmf_scp_shutdown,
++	.driver = {
++		.name = "cmf-scp-sensors",
++		.of_match_table = cmf_scp_of_match,
++		.pm = pm_sleep_ptr(&cmf_scp_pm_ops),
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
++	},
++};
++module_platform_driver(cmf_scp_driver);
++
++MODULE_DESCRIPTION("CMF Phone 1 MT6878 SCP accelerometer and light sensor");
++MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

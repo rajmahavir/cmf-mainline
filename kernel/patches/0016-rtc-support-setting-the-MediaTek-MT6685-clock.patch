@@ -1,0 +1,237 @@
+From 5a45062c26c000764f54aef306996af40d7e9a99 Mon Sep 17 00:00:00 2001
+From: CMF mainline <cmf-mainline@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 12:07:34 +0000
+Subject: [PATCH] rtc: support setting the MediaTek MT6685 clock
+
+Unmask the RTC clocks while staging a new time. Commit the values
+with WRTGR and wait for CBUSY. Verify the applied time and restore
+the original RTC clock gates.
+---
+ drivers/rtc/Kconfig      |   4 +-
+ drivers/rtc/rtc-mt6685.c | 146 +++++++++++++++++++++++++++++++++++----
+ 2 files changed, 136 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/rtc/Kconfig b/drivers/rtc/Kconfig
+index fc145d14e..e24045b90 100644
+--- a/drivers/rtc/Kconfig
++++ b/drivers/rtc/Kconfig
+@@ -1960,8 +1960,8 @@ config RTC_DRV_MT6685
+ 	tristate "MediaTek MT6685 PMIC RTC"
+ 	depends on OF && SPMI
+ 	help
+-	  Enable read access to the real-time clock in the MediaTek MT6685
+-	  PMIC over SPMI. This driver supports reading the clock counters.
++	  Enable the real-time clock in the MediaTek MT6685 PMIC over SPMI.
++	  This driver supports reading and setting the clock.
+ 
+ 	  To compile this driver as a module, choose M here: the module
+ 	  will be called rtc-mt6685.
+diff --git a/drivers/rtc/rtc-mt6685.c b/drivers/rtc/rtc-mt6685.c
+index a5d8664aa..439958214 100644
+--- a/drivers/rtc/rtc-mt6685.c
++++ b/drivers/rtc/rtc-mt6685.c
+@@ -1,6 +1,8 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+-/* MediaTek MT6685 RTC counter reader. */
++/* MediaTek MT6685 RTC. */
+ 
++#include <linux/delay.h>
++#include <linux/iopoll.h>
+ #include <linux/limits.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -10,10 +12,30 @@
+ #include <linux/spmi.h>
+ #include <linux/unaligned.h>
+ 
++#define MT6685_RTC_CKPDN	0x514
++#define MT6685_RTC_CKPDN_SET	0x515
++#define MT6685_RTC_CKPDN_CLR	0x516
++#define MT6685_RTC_CKPDN_MASK	(BIT(4) | BIT(5))
++
++#define MT6685_RTC_BBPU		0x08
++#define MT6685_RTC_BBPU_CBUSY	BIT(6)
+ #define MT6685_RTC_TC_SEC	0x12
+-#define MT6685_RTC_TC_YEAR	0x1e
++#define MT6685_RTC_WRTGR	0x42
+ #define MT6685_RTC_YEAR_BASE	1968
+ 
++enum mt6685_calendar_field {
++	SEC, MIN, HOUR, DAY, WDAY, MONTH, YEAR, NUM_FIELDS,
++};
++
++static const u16 mt6685_calendar_mask[NUM_FIELDS] = {
++	[SEC] = 0x3f,
++	[MIN] = 0x3f,
++	[HOUR] = 0x1f,
++	[DAY] = 0x1f,
++	[MONTH] = 0x0f,
++	[YEAR] = 0x7f,
++};
++
+ struct mt6685_rtc {
+ 	struct spmi_device *spmi;
+ 	u16 base;
+@@ -35,7 +57,7 @@ static int mt6685_rtc_read_counter(struct mt6685_rtc *rtc, u16 offset)
+ static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
+ {
+ 	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
+-	u16 counters[7];
++	u16 counters[NUM_FIELDS];
+ 	int attempt, i, ret;
+ 
+ 	/* The PMIC exposes live counters. Retry a snapshot spanning a tick. */
+@@ -50,18 +72,20 @@ static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
+ 		ret = mt6685_rtc_read_counter(rtc, MT6685_RTC_TC_SEC);
+ 		if (ret < 0)
+ 			return ret;
+-		if ((ret & 0x3f) == (counters[0] & 0x3f))
++		if ((ret & mt6685_calendar_mask[SEC]) ==
++		    (counters[SEC] & mt6685_calendar_mask[SEC]))
+ 			break;
+ 	}
+ 	if (attempt == 3)
+ 		return -EAGAIN;
+ 
+-	tm->tm_sec = counters[0] & 0x3f;
+-	tm->tm_min = counters[1] & 0x3f;
+-	tm->tm_hour = counters[2] & 0x1f;
+-	tm->tm_mday = counters[3] & 0x1f;
+-	tm->tm_mon = (counters[5] & 0x0f) - 1;
+-	tm->tm_year = (counters[6] & 0x7f) + MT6685_RTC_YEAR_BASE - 1900;
++	tm->tm_sec = counters[SEC] & mt6685_calendar_mask[SEC];
++	tm->tm_min = counters[MIN] & mt6685_calendar_mask[MIN];
++	tm->tm_hour = counters[HOUR] & mt6685_calendar_mask[HOUR];
++	tm->tm_mday = counters[DAY] & mt6685_calendar_mask[DAY];
++	tm->tm_mon = (counters[MONTH] & mt6685_calendar_mask[MONTH]) - 1;
++	tm->tm_year = (counters[YEAR] & mt6685_calendar_mask[YEAR]) +
++		      MT6685_RTC_YEAR_BASE - 1900;
+ 
+ 	ret = rtc_valid_tm(tm);
+ 	if (ret)
+@@ -72,8 +96,106 @@ static int mt6685_rtc_read_time(struct device *dev, struct rtc_time *tm)
+ 	return 0;
+ }
+ 
++static int mt6685_rtc_write_counter(struct mt6685_rtc *rtc, u16 offset, u16 val)
++{
++	u8 data[2];
++
++	put_unaligned_le16(val, data);
++	return spmi_ext_register_writel(rtc->spmi, rtc->base + offset,
++					data, sizeof(data));
++}
++
++static int mt6685_rtc_wait_ready(struct mt6685_rtc *rtc)
++{
++	int bbpu, ret;
++
++	ret = read_poll_timeout(mt6685_rtc_read_counter, bbpu,
++				bbpu < 0 || !(bbpu & MT6685_RTC_BBPU_CBUSY),
++				50, USEC_PER_SEC, false, rtc, MT6685_RTC_BBPU);
++	return ret ? ret : min(bbpu, 0);
++}
++
++static int mt6685_rtc_commit_time(struct device *dev, struct rtc_time *tm)
++{
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	const u16 counters[NUM_FIELDS] = {
++		[SEC] = tm->tm_sec,
++		[MIN] = tm->tm_min,
++		[HOUR] = tm->tm_hour,
++		[DAY] = tm->tm_mday,
++		[MONTH] = tm->tm_mon + 1,
++		[YEAR] = tm->tm_year + 1900 - MT6685_RTC_YEAR_BASE,
++	};
++	time64_t written, requested = rtc_tm_to_time64(tm);
++	struct rtc_time readback;
++	int field, ret;
++	u16 offset, mask;
++
++	ret = mt6685_rtc_wait_ready(rtc);
++	if (ret)
++		return ret;
++
++	for (field = 0; field < NUM_FIELDS; field++) {
++		mask = mt6685_calendar_mask[field];
++		if (!mask)
++			continue;
++
++		offset = MT6685_RTC_TC_SEC + 2 * field;
++		ret = mt6685_rtc_read_counter(rtc, offset);
++		if (ret < 0)
++			return ret;
++		ret = mt6685_rtc_write_counter(rtc, offset,
++					       (ret & ~mask) | counters[field]);
++		if (ret)
++			return ret;
++	}
++
++	ret = mt6685_rtc_write_counter(rtc, MT6685_RTC_WRTGR, 1);
++	if (ret)
++		return ret;
++	ret = mt6685_rtc_wait_ready(rtc);
++	if (ret)
++		return ret;
++
++	ret = mt6685_rtc_read_time(dev, &readback);
++	if (ret)
++		return ret;
++	written = rtc_tm_to_time64(&readback);
++	return written < requested || written > requested + 1 ? -EIO : 0;
++}
++
++static int mt6685_rtc_set_time(struct device *dev, struct rtc_time *tm)
++{
++	struct mt6685_rtc *rtc = dev_get_drvdata(dev);
++	u8 clock_bits;
++	int ret, restore;
++
++	ret = spmi_ext_register_readl(rtc->spmi, MT6685_RTC_CKPDN,
++				      &clock_bits, sizeof(clock_bits));
++	if (ret)
++		return ret;
++	clock_bits &= MT6685_RTC_CKPDN_MASK;
++	if (!clock_bits)
++		return mt6685_rtc_commit_time(dev, tm);
++
++	/* Keep both RTC clocks running during the write, then restore the gates. */
++	ret = spmi_ext_register_writel(rtc->spmi, MT6685_RTC_CKPDN_CLR,
++					&clock_bits, sizeof(clock_bits));
++	if (!ret) {
++		usleep_range(1000, 1500);
++		ret = mt6685_rtc_commit_time(dev, tm);
++	}
++
++	restore = spmi_ext_register_writel(rtc->spmi, MT6685_RTC_CKPDN_SET,
++					    &clock_bits, sizeof(clock_bits));
++	if (restore)
++		dev_err(dev, "Failed to restore RTC clock gates: %d\n", restore);
++	return ret ? ret : restore;
++}
++
+ static const struct rtc_class_ops mt6685_rtc_ops = {
+ 	.read_time = mt6685_rtc_read_time,
++	.set_time = mt6685_rtc_set_time,
+ };
+ 
+ static int mt6685_rtc_probe(struct platform_device *pdev)
+@@ -92,7 +214,7 @@ static int mt6685_rtc_probe(struct platform_device *pdev)
+ 	ret = device_property_read_u32(dev, "reg", &base);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "Cannot read RTC register base\n");
+-	if (base > U16_MAX - MT6685_RTC_TC_YEAR - 1)
++	if (base > U16_MAX - MT6685_RTC_WRTGR - 1)
+ 		return -EINVAL;
+ 
+ 	rtc = devm_kzalloc(dev, sizeof(*rtc), GFP_KERNEL);
+@@ -129,5 +251,5 @@ static struct platform_driver mt6685_rtc_driver = {
+ };
+ module_platform_driver(mt6685_rtc_driver);
+ 
+-MODULE_DESCRIPTION("MediaTek MT6685 RTC counter reader");
++MODULE_DESCRIPTION("MediaTek MT6685 RTC");
+ MODULE_LICENSE("GPL");
+-- 
+2.53.0
+

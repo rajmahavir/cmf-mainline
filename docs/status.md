@@ -23,9 +23,9 @@ State on our reference phone (Stage 95c, 27 November 2026): Ubuntu 26.04 + Phosh
 | Suspend (s2idle) | 🚧 in progress | real s2idle for >60 s and wake on incoming call verified; Power-key wake and watchdog handling in suspend still open; sleep targets masked by default |
 | TEE (Kinibi) | ✅ optional | driver loads and talks to the TEE; nothing in the default system uses it yet |
 | Hardware watchdog | ✅ works | fed by systemd (20 s) |
-| RTC | ❌ missing | no DT node/driver; time comes from NTP |
+| RTC | ✅ works | MT6685 exposes `/dev/rtc0`, sets the system clock at boot and accepts time updates. Offline boot, time set/readback and the Android round trip verified on Stage 97. |
 | Camera | ❌ missing | |
-| Sensors | ❌ missing | no accelerometer, light, proximity (no IIO devices) |
+| Accelerometer and ambient light | ✅ works | The MT6878 SCP driver exposes the ICM4N607 accelerometer and LTR569 light sensor at boot. Verified automatic dimming and brightening on Stage 99. The owner confirmed portrait and both landscape orientations with the corrected mount matrix, carried in the Stage 99b device tree. |
 | Fingerprint | ❌ missing | |
 | NFC | ❌ missing | |
 | GPS/GNSS | ❌ missing | |

@@ -56,7 +56,7 @@ Start at [docs/guide/README.md](docs/guide/README.md).
 
 | Path | What |
 |---|---|
-| `kernel/patches/` | 14 patches against [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) `12f2e9f04` |
+| `kernel/patches/` | Kernel patch series against [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) `12f2e9f04` |
 | `kernel/config-7.2.0-cmf`, `kernel/dts/` | kernel config and the device tree |
 | `initramfs/` | `/init` (USB serial shell, internal-root crash guard, journaled root) and its QEMU tests |
 | `boot/` | the boot shim and LK modem-record helper (source + tiny prebuilt) |

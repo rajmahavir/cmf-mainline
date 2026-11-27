@@ -1005,6 +1005,20 @@
 			phandle = <0x26>;
 		};
 
+		scp@1c400000 {
+			compatible = "nothing,tetris-scp-sensors";
+			reg = <0x1c400000 0x100000>, <0x1cb30000 0x1000>,
+			      <0x1cbb0000 0x110>, <0x1c012008 0x4>,
+			      <0x1cb50018 0x4>;
+			reg-names = "tcm", "core", "mailbox", "clock-status",
+				    "ap-irq-clear";
+			mediatek,infracfg = <&cmf_infra_ao>;
+			memory-region = <&scp_share>;
+			mount-matrix = "-1", "0", "0",
+				       "0", "-1", "0",
+				       "0", "0", "1";
+		};
+
 		cmf_gpu_spm: syscon@1c001000 {
 			phandle = <0x503>;
 			compatible = "syscon", "simple-mfd";
@@ -1235,6 +1249,13 @@
 			pmic@9 {
 				compatible = "mediatek,mt6685-consys-audio-regmap", "mediatek,mt6685-consys-regmap";
 				reg = <0x09 0x00>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				rtc@580 {
+					compatible = "mediatek,mt6685-rtc";
+					reg = <0x580>;
+				};
 
 				cmf_audio_xo: clock-controller {
 					phandle = <0x50c>;
@@ -1506,7 +1527,7 @@
 			compatible = "mediatek,mm_ccu_reserved";
 		};
 
-		mblock-28-reserve-memory-scp_share {
+		scp_share: mblock-28-reserve-memory-scp_share {
 			reg = <0x00 0x8e000000 0x00 0x11c8000>;
 			no-map;
 			compatible = "mediatek,reserve-memory-scp_share";
