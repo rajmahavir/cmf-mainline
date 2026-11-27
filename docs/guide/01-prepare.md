@@ -2,7 +2,7 @@
 
 ## What you need
 
-- Nothing CMF Phone 1 (A015, MT6878). Tested on the global variant with 8 GB RAM / 256 GB UFS.
+- Nothing CMF Phone 1 (A015, MT6878). Tested on one 8 GB RAM / 128 GB unit (used in India). The 6 GB and 256 GB models are untested; see [status](../status.md#reference-device).
 - A microSD card, 32 GB or more (A1/A2, a known brand: it holds the rescue system).
 - A USB-C data cable.
 - A build host: x86-64 Linux (Ubuntu 24.04+ or Debian 13 recommended), ~40 GB free.

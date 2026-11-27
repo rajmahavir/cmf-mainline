@@ -31,6 +31,17 @@ State on our reference phone (Stage 95c, 27 November 2026): Ubuntu 26.04 + Phosh
 | Vibration | ❌ not tested | |
 | USB OTG / host | ❌ not tested | the port runs in gadget mode for the serial console |
 
+## Reference device
+
+| | |
+|---|---|
+| Model | CMF Phone 1, A015 (`tetris`) |
+| RAM / storage | 8 GB / 128 GB, SK hynix `H9QT0G6CN6X146` (RAM + UFS 2.2 package) |
+| Display / touch | Samsung `s6e8fc3x02` AMOLED, FocalTech FT3519 |
+| Bootloader | LK from an Android 16 Nothing OS build |
+
+Other units may differ: the **6 GB** model (India only) needs a different memory size in the device tree (the DTB currently describes 8 GiB), and phones with another display panel, touch controller or bootloader version are untested.
+
 ## Known problems
 
 - **Rare reset a few seconds after a Power-key screen wake** (seen twice in about two days). Under investigation; stream the crash log ([guide step 8](guide/08-troubleshooting.md)) if you see it.
