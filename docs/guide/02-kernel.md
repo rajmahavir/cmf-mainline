@@ -1,6 +1,6 @@
 # 2. Build the kernel
 
-The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) at commit `12f2e9f04` (Linux 7.2 development, 28 Aug 2026) plus the 18 patches in `kernel/patches/`.
+The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) at commit `12f2e9f04` (Linux 7.2 development, 28 Aug 2026) plus the 19 patches in `kernel/patches/`.
 
 | Patch | Area |
 |---|---|
@@ -22,6 +22,7 @@ The kernel is [MT6878-Mainline/linux](https://github.com/MT6878-Mainline/linux) 
 | 0016 | RTC: set the MT6685 clock using the PMIC write trigger |
 | 0017 | IIO: accelerometer and ambient light over the LK-provisioned MT6878 SCP |
 | 0018 | IIO: drain sensor data while waiting for SCP control acknowledgements |
+| 0019 | drm/mediatek: send MT6878 panel brightness writes during video scanout (no picture stop) |
 
 ## 2.1 Firmware built into the Image
 

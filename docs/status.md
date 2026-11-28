@@ -7,7 +7,7 @@ State on our reference phone (Stage 95c, 27 November 2026): Ubuntu 26.04 + Phosh
 | Boot | ✅ works | Stock LK (unlocked) → shim → Linux 7.2. Only `boot_a` is flashed. `fastboot boot` is not accepted by LK. |
 | Dual boot with Android | ✅ works | optional: a 3-second boot menu (Linux default, Volume Down switches) boots Linux or Android from the same `boot_a` ([guide step 3](guide/03-boot-image.md)) |
 | USB serial console | ✅ works | CDC ACM gadget, root shell from the initramfs onward and in emergency mode |
-| Display | ✅ works | 1080×2400 AMOLED, native `mediatek-drm` + DSI, display power cycling, backlight |
+| Display | ✅ works | 1080×2400 AMOLED, native `mediatek-drm` + DSI, display power cycling, backlight. Brightness changes are sent between frames, so automatic brightness no longer stops the picture (patch 0019) |
 | GPU | ✅ works | Mali-G615 MC2, **Panthor** (built in, Mali CSF firmware built into the Image) + Mesa 26.3; Phosh renders with GLES2 |
 | Touch | ✅ works | FocalTech FT3519 |
 | Keys | ✅ works | Power + Volume Up via MT6363 PMIC IRQs; Volume Down via gpio-keys |
@@ -46,6 +46,8 @@ Other units may differ. The **6 GB** model (India only) should work: the boot sh
 ## Known problems
 
 - **Rare reset a few seconds after a Power-key screen wake** (seen twice in about two days). Under investigation; stream the crash log ([guide step 8](guide/08-troubleshooting.md)) if you see it.
+- **Brief black flash when the screen rotates.** The compositor (phoc 0.54) covers the output while the layout changes; the display hardware keeps scanning out. Under investigation.
+- Automatic brightness changes in visible steps: Phosh fades in steps about 150–400 ms apart.
 - RAM pstore doesn't survive resets on this phone (the bootloader clears it).
 - Don't unbind and rebind the sound card (`/sys/bus/platform/drivers/mt6878-cmf`): the rebind oopses (CFI) in `snd_soc_bind_card` and the next reboot hangs. Reboot instead.
 - The connectivity drivers are vendor code with a one-shot probe: if Wi-Fi calibration fails, reboot rather than reloading modules.
